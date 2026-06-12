@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Claude Code local config
+.claude/
+
+# Rust build output (qql-studio/src-tauri/target is ~9.5 GB — never commit)
+**/target/
+
+# Node / frontend build
+**/node_modules/
+qql-studio/build/
+qql-studio/.svelte-kit/
+qql-studio/package/
+
+# Tauri generated
+qql-studio/src-tauri/gen/
+
+# Env files
+**/.env
+**/.env.*
+!**/.env.example
+
+# Editor / misc
+*.swp
+*~
