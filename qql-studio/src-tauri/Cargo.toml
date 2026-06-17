@@ -22,6 +22,7 @@ qql = { path = "../../qqlrs-main" }
 raqote = "0.8"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.17"
 base64 = "0.22"
 rand = "0.8"
 once_cell = "1"

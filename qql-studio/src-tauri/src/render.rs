@@ -321,20 +321,133 @@ pub fn render_png_bytes(seed: &[u8; 32], width: i32) -> Result<Vec<u8>> {
     drawtarget_to_png_bytes(&render_data.canvas)
 }
 
-fn drawtarget_to_png_bytes(dt: &raqote::DrawTarget) -> Result<Vec<u8>> {
+/// Convert a raqote DrawTarget into (width, height, RGBA bytes). raqote stores
+/// each pixel as u32 in 0xAARRGGBB form; little-endian byte order is [B, G, R, A].
+fn drawtarget_to_rgba(dt: &raqote::DrawTarget) -> (u32, u32, Vec<u8>) {
     let (w, h) = (dt.width() as u32, dt.height() as u32);
     let raw = dt.get_data();
-    // raqote stores each pixel as u32 in 0xAARRGGBB form; little-endian byte
-    // order is [B, G, R, A]. Convert to RGBA for the image crate.
     let mut rgba = Vec::<u8>::with_capacity(raw.len() * 4);
     for pixel in raw {
         let [b, g, r, a] = pixel.to_le_bytes();
         rgba.extend_from_slice(&[r, g, b, a]);
     }
+    (w, h, rgba)
+}
+
+fn drawtarget_to_png_bytes(dt: &raqote::DrawTarget) -> Result<Vec<u8>> {
+    let (w, h, rgba) = drawtarget_to_rgba(dt);
     let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
         ImageBuffer::from_vec(w, h, rgba).context("failed to wrap raqote data into image")?;
     let mut buf = Cursor::new(Vec::<u8>::new());
     img.write_to(&mut buf, ImageFormat::Png)
         .context("failed to encode PNG")?;
     Ok(buf.into_inner())
+}
+
+/// Render a seed as an "build-in" animation: the piece paints on progressively.
+/// Returns one compressed PNG per frame. `target_frames` controls the pace —
+/// we derive `Animation::Points { step }` from the piece's point count so the
+/// result lands near that many frames. Collecting *compressed* frames keeps
+/// memory bounded even at large resolutions.
+///
+/// `on_progress(done, total_estimate)` is called as each frame is produced, and
+/// `cancel` is polled between frames (best-effort: the underlying `draw()` can't
+/// be interrupted mid-frame, so this stops collecting rather than instantly
+/// freeing the CPU).
+pub fn render_animation_frames(
+    seed: &[u8; 32],
+    width: i32,
+    target_frames: usize,
+    mut on_progress: impl FnMut(usize, usize),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Vec<u8>>> {
+    use std::sync::atomic::Ordering;
+    let num_points = layout_only(seed).num_points;
+    let frames_wanted = target_frames.clamp(2, 600);
+    let step = ((num_points / frames_wanted).max(1)) as u32;
+    let total_est = num_points / step.max(1) as usize + 2;
+    let chunks = if width >= 1500 { "2x2" } else { "1x1" };
+    let cfg = Config {
+        animate: qql::config::Animation::Points { step },
+        splatter_immediately: true,
+        chunks: chunks.parse().unwrap(),
+        ..Config::default()
+    };
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut cancelled = false;
+    art::draw(seed, color_db(), &cfg, width, |frame| {
+        if cancelled || cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            return;
+        }
+        if let Ok(png) = drawtarget_to_png_bytes(frame.dt) {
+            frames.push(png);
+            on_progress(frames.len(), total_est);
+        }
+    });
+    if cancelled {
+        anyhow::bail!("cancelled");
+    }
+    Ok(frames)
+}
+
+/// Encode a sequence of PNG frames into an animated PNG (APNG). Full color,
+/// lossless, loops forever. `delay_ms` is the per-frame delay; the final frame
+/// is held for `hold_ms` if that's longer. Frames are decoded one at a time to
+/// keep peak memory low.
+pub fn encode_apng(frames: &[Vec<u8>], delay_ms: u16, hold_ms: u16) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        anyhow::bail!("no frames to encode");
+    }
+    let first = image::load_from_memory(&frames[0])
+        .context("decoding first frame")?
+        .to_rgba8();
+    let (w, h) = (first.width(), first.height());
+    let mut out = Cursor::new(Vec::<u8>::new());
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_animated(frames.len() as u32, 0)
+            .context("set_animated")?;
+        enc.set_frame_delay(delay_ms, 1000).context("set_frame_delay")?;
+        let mut writer = enc.write_header().context("apng write_header")?;
+        for (i, f) in frames.iter().enumerate() {
+            let rgba = if i == 0 {
+                first.as_raw().clone()
+            } else {
+                image::load_from_memory(f)
+                    .with_context(|| format!("decoding frame {i}"))?
+                    .to_rgba8()
+                    .into_raw()
+            };
+            if i + 1 == frames.len() && hold_ms > delay_ms {
+                writer
+                    .set_frame_delay(hold_ms, 1000)
+                    .context("final frame hold")?;
+            }
+            writer
+                .write_image_data(&rgba)
+                .with_context(|| format!("writing apng frame {i}"))?;
+        }
+        writer.finish().context("apng finish")?;
+    }
+    Ok(out.into_inner())
+}
+
+/// Wrap raw PNG bytes as a base64 data URL (for sending frames to the webview
+/// animation player).
+pub fn png_to_data_url(png: &[u8]) -> String {
+    format!("data:image/png;base64,{}", B64.encode(png))
+}
+
+/// Write a sequence of PNG frames as numbered files into `dir` (created if
+/// needed). Returns the directory path.
+pub fn write_frame_sequence(frames: &[Vec<u8>], dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (i, f) in frames.iter().enumerate() {
+        let name = format!("frame_{:04}.png", i + 1);
+        std::fs::write(dir.join(&name), f).with_context(|| format!("writing {name}"))?;
+    }
+    Ok(())
 }

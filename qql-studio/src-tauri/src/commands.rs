@@ -1036,7 +1036,7 @@ pub async fn save_seed_png(
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
         let png = render::render_png_bytes(&bytes, w).map_err(|e| e.to_string())?;
-        let name = format!("{}.png", seed_hex.trim_start_matches("0x"));
+        let name = format!("0x{}.png", seed_hex.trim_start_matches("0x"));
         let path = std::path::Path::new(&folder).join(name);
         std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
         Ok(path.to_string_lossy().into_owned())
@@ -1072,6 +1072,126 @@ pub async fn export_seed_png(
         let png = render::render_png_bytes(&bytes, w).map_err(|e| e.to_string())?;
         std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
         Ok(path)
+    })
+    .await
+    .map_err(|e| format!("worker join error: {e}"))?
+}
+
+/// Cancel flag for an in-flight animation render (best-effort: stops collecting
+/// frames between frames; the underlying draw can't be interrupted mid-frame).
+static CANCEL_ANIM: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationProgress {
+    pub done: usize,
+    pub total: usize,
+    /// "rendering" while frames are produced, "encoding" while writing output.
+    pub phase: String,
+}
+
+#[tauri::command]
+pub fn cancel_animation() {
+    CANCEL_ANIM.store(true, Ordering::SeqCst);
+}
+
+/// Render an animation and return the frames as PNG data URLs for the in-app
+/// player. Width is capped to a preview-friendly size.
+#[tauri::command]
+pub async fn animation_preview(
+    app: AppHandle,
+    seed_hex: String,
+    width: i32,
+    frames: usize,
+) -> Result<Vec<String>, String> {
+    CANCEL_ANIM.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
+        let w = width.clamp(64, 1280);
+        let app2 = app.clone();
+        let pngs = render::render_animation_frames(
+            &bytes,
+            w,
+            frames,
+            |done, total| {
+                let _ = app2.emit(
+                    "animation-progress",
+                    AnimationProgress {
+                        done,
+                        total,
+                        phase: "rendering".into(),
+                    },
+                );
+            },
+            &CANCEL_ANIM,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        Ok(pngs.iter().map(|p| render::png_to_data_url(p)).collect())
+    })
+    .await
+    .map_err(|e| format!("worker join error: {e}"))?
+}
+
+/// Render an animation and write it out. `format` is "apng" (write APNG to the
+/// `dest` file path) or "frames" (write numbered PNGs into the `dest` folder).
+/// Returns the path written.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn export_animation(
+    app: AppHandle,
+    seed_hex: String,
+    width: i32,
+    frames: usize,
+    format: String,
+    delay_ms: u16,
+    hold_ms: u16,
+    dest: String,
+) -> Result<String, String> {
+    CANCEL_ANIM.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
+        let w = width.clamp(64, 4800);
+        let app2 = app.clone();
+        let pngs = render::render_animation_frames(
+            &bytes,
+            w,
+            frames,
+            |done, total| {
+                let _ = app2.emit(
+                    "animation-progress",
+                    AnimationProgress {
+                        done,
+                        total,
+                        phase: "rendering".into(),
+                    },
+                );
+            },
+            &CANCEL_ANIM,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        let n = pngs.len();
+        let _ = app.emit(
+            "animation-progress",
+            AnimationProgress {
+                done: n,
+                total: n,
+                phase: "encoding".into(),
+            },
+        );
+        match format.as_str() {
+            "apng" => {
+                let data =
+                    render::encode_apng(&pngs, delay_ms, hold_ms).map_err(|e| format!("{e:#}"))?;
+                std::fs::write(&dest, &data).map_err(|e| format!("write failed: {e}"))?;
+                Ok(dest)
+            }
+            "frames" => {
+                let dir = std::path::Path::new(&dest);
+                render::write_frame_sequence(&pngs, dir).map_err(|e| format!("{e:#}"))?;
+                Ok(dir.to_string_lossy().into_owned())
+            }
+            other => Err(format!("unknown format: {other}")),
+        }
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
@@ -1157,6 +1277,31 @@ mod tests {
                 angle
             );
         }
+    }
+
+    #[test]
+    fn animation_frames_and_apng() {
+        use std::sync::atomic::AtomicBool;
+        let seed = hex_literal::hex!(
+            "33c9371d25ce44a408f8a6473fbad86bf81e1a17a2e52c90cf66ffff1296712e"
+        );
+        let cancel = AtomicBool::new(false);
+        let frames =
+            render::render_animation_frames(&seed, 240, 20, |_done, _total| {}, &cancel).unwrap();
+        assert!(
+            frames.len() > 2,
+            "expected several frames, got {}",
+            frames.len()
+        );
+        // Each frame is a valid PNG.
+        assert_eq!(&frames[0][0..8], b"\x89PNG\r\n\x1a\n");
+        // The APNG is a valid PNG and carries the animation-control (acTL) chunk.
+        let apng = render::encode_apng(&frames, 50, 500).unwrap();
+        assert_eq!(&apng[0..8], b"\x89PNG\r\n\x1a\n");
+        assert!(
+            apng.windows(4).any(|w| w == b"acTL"),
+            "APNG missing acTL chunk"
+        );
     }
 
     #[test]

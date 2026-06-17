@@ -3002,6 +3002,7 @@ dependencies = [
  "hex-literal 0.4.1",
  "image",
  "once_cell",
+ "png 0.17.16",
  "qql",
  "rand",
  "raqote",

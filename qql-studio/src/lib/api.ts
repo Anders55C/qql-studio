@@ -217,6 +217,29 @@ export const deleteSeedPng = (folder: string, seed: string) =>
 	invoke<void>('delete_seed_png', { folder, seedHex: seed });
 export const exportSeedPng = (seed: string, width: number, path: string) =>
 	invoke<string>('export_seed_png', { seedHex: seed, width, path });
+
+export type AnimationProgress = { done: number; total: number; phase: string };
+export const animationPreview = (seed: string, width: number, frames: number) =>
+	invoke<string[]>('animation_preview', { seedHex: seed, width, frames });
+export const exportAnimation = (
+	seed: string,
+	width: number,
+	frames: number,
+	format: 'apng' | 'frames',
+	delayMs: number,
+	holdMs: number,
+	dest: string
+) =>
+	invoke<string>('export_animation', {
+		seedHex: seed,
+		width,
+		frames,
+		format,
+		delayMs,
+		holdMs,
+		dest
+	});
+export const cancelAnimation = () => invoke<void>('cancel_animation');
 export const layoutSummary = (seedHex: string) =>
 	invoke<LayoutStats>('layout_summary', { seedHex });
 export const randomSeedForAddress = (address: string) =>

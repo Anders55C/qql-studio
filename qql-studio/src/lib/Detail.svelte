@@ -1,6 +1,16 @@
 <script lang="ts">
-	import { exportSeedPng, renderSeed, type Candidate } from './api';
-	import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+	import {
+		animationPreview,
+		cancelAnimation,
+		exportAnimation,
+		exportSeedPng,
+		renderSeed,
+		type AnimationProgress,
+		type Candidate
+	} from './api';
+	import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+	import { onDestroy, onMount } from 'svelte';
 
 	type Props = {
 		candidate: Candidate;
@@ -49,7 +59,7 @@
 	// chosen width, and write it there. Independent of the favorites folder.
 	async function saveAs() {
 		if (exporting) return;
-		const name = `${candidate.seed.replace(/^0x/, '')}.png`;
+		const name = `${candidate.seed}.png`;
 		const dest = await saveDialog({
 			defaultPath: name,
 			filters: [{ name: 'PNG image', extensions: ['png'] }]
@@ -65,6 +75,127 @@
 			exporting = false;
 		}
 	}
+
+	// ---- Animation ----------------------------------------------------------
+	let showAnim = $state(false);
+	let animFrameCount = $state(60);
+	let animSize = $state(720);
+	let animFps = $state(20);
+	let animHoldMs = $state(600);
+	let frames = $state<string[] | null>(null);
+	let frameIdx = $state(0);
+	let playing = $state(false);
+	let building = $state(false);
+	let animProgress = $state<AnimationProgress | null>(null);
+	let animError = $state<string | null>(null);
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let unlistenProg: UnlistenFn | null = null;
+
+	const delayMs = () => Math.max(16, Math.round(1000 / animFps));
+
+	function stopPlayer() {
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+		playing = false;
+	}
+	function startPlayer() {
+		if (!frames || frames.length === 0) return;
+		stopPlayer();
+		playing = true;
+		timer = setInterval(() => {
+			if (!frames) return;
+			frameIdx = (frameIdx + 1) % frames.length;
+		}, delayMs());
+	}
+
+	async function buildAnimation() {
+		if (building) return;
+		stopPlayer();
+		building = true;
+		animError = null;
+		animProgress = null;
+		frames = null;
+		frameIdx = 0;
+		try {
+			frames = await animationPreview(candidate.seed, animSize, animFrameCount);
+			frameIdx = 0;
+			startPlayer();
+		} catch (e) {
+			animError = String(e);
+		} finally {
+			building = false;
+			animProgress = null;
+		}
+	}
+
+	async function exportApng() {
+		if (exporting) return;
+		const dest = await saveDialog({
+			defaultPath: `${candidate.seed}_anim.png`,
+			filters: [{ name: 'Animated PNG', extensions: ['png'] }]
+		});
+		if (!dest) return;
+		exporting = true;
+		animError = null;
+		animProgress = null;
+		try {
+			await exportAnimation(
+				candidate.seed,
+				animSize,
+				animFrameCount,
+				'apng',
+				delayMs(),
+				animHoldMs,
+				dest
+			);
+		} catch (e) {
+			animError = `Export failed: ${e}`;
+		} finally {
+			exporting = false;
+			animProgress = null;
+		}
+	}
+
+	async function exportFrames() {
+		if (exporting) return;
+		const folder = await openDialog({
+			directory: true,
+			title: 'Choose a folder for the frame sequence'
+		});
+		if (typeof folder !== 'string') return;
+		const dest = `${folder}/${candidate.seed}_frames`;
+		exporting = true;
+		animError = null;
+		animProgress = null;
+		try {
+			await exportAnimation(
+				candidate.seed,
+				animSize,
+				animFrameCount,
+				'frames',
+				delayMs(),
+				animHoldMs,
+				dest
+			);
+		} catch (e) {
+			animError = `Export failed: ${e}`;
+		} finally {
+			exporting = false;
+			animProgress = null;
+		}
+	}
+
+	onMount(async () => {
+		unlistenProg = await listen<AnimationProgress>('animation-progress', (e) => {
+			animProgress = e.payload;
+		});
+	});
+	onDestroy(() => {
+		stopPlayer();
+		unlistenProg?.();
+	});
 
 	$effect(() => {
 		load();
@@ -102,7 +233,9 @@
 ></div>
 <div class="panel" role="dialog" aria-modal="true">
 	<div class="art-pane">
-		{#if pngUrl}
+		{#if frames}
+			<img src={frames[frameIdx]} alt="QQL animation frame" />
+		{:else if pngUrl}
 			<img src={pngUrl} alt="QQL render" />
 		{:else if loading}
 			<div class="placeholder">rendering at {width}px…</div>
@@ -150,7 +283,86 @@
 			<button onclick={saveAs} disabled={exporting}>
 				{exporting ? 'Saving…' : 'Save As…'}
 			</button>
+			<button class:on={showAnim} onclick={() => (showAnim = !showAnim)}>
+				{showAnim ? '▾ Animate' : '▸ Animate'}
+			</button>
 		</div>
+
+		{#if showAnim}
+			<div class="anim">
+				<div class="anim-grid">
+					<label>
+						Frames
+						<input type="number" min="2" max="600" step="1" bind:value={animFrameCount} />
+					</label>
+					<label>
+						Size
+						<select bind:value={animSize}>
+							<option value={480}>480</option>
+							<option value={720}>720</option>
+							<option value={1080}>1080</option>
+						</select>
+					</label>
+					<label>
+						Speed (fps)
+						<input
+							type="number"
+							min="2"
+							max="60"
+							step="1"
+							bind:value={animFps}
+							onchange={() => playing && startPlayer()}
+						/>
+					</label>
+					<label>
+						Hold end (ms)
+						<input type="number" min="0" max="5000" step="100" bind:value={animHoldMs} />
+					</label>
+				</div>
+
+				{#if building}
+					<div class="anim-status">
+						Rendering…
+						{#if animProgress}{animProgress.done}/{animProgress.total}{/if}
+						<button onclick={cancelAnimation}>cancel</button>
+					</div>
+				{:else}
+					<button class="primary" onclick={buildAnimation}>
+						{frames ? 'Re-build animation' : 'Build animation'}
+					</button>
+				{/if}
+
+				{#if frames}
+					<div class="player">
+						<button onclick={() => (playing ? stopPlayer() : startPlayer())}>
+							{playing ? '❚❚' : '▶'}
+						</button>
+						<input
+							type="range"
+							min="0"
+							max={frames.length - 1}
+							bind:value={frameIdx}
+							oninput={stopPlayer}
+						/>
+						<span class="frame-num">{frameIdx + 1}/{frames.length}</span>
+					</div>
+					<div class="anim-export">
+						<button onclick={exportApng} disabled={exporting}>
+							{exporting ? 'Exporting…' : 'Export APNG'}
+						</button>
+						<button onclick={exportFrames} disabled={exporting}>Export frames…</button>
+					</div>
+					{#if exporting && animProgress}
+						<div class="anim-status">
+							{animProgress.phase}… {animProgress.done}/{animProgress.total}
+						</div>
+					{/if}
+				{/if}
+
+				{#if animError}<div class="anim-err">{animError}</div>{/if}
+			</div>
+		{/if}
+
 		<h3>Traits</h3>
 		<table class="traits">
 			<tbody>
@@ -471,6 +683,64 @@
 	}
 	button.fav.on:hover:not(:disabled) {
 		background: #3a2228;
+	}
+	.anim {
+		margin-top: 12px;
+		padding: 12px;
+		background: #0d0d0d;
+		border: 1px solid #2a2a2a;
+		border-radius: 6px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.anim-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 8px;
+	}
+	.anim-grid label {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		font-size: 11px;
+		color: #888;
+	}
+	.anim-status {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 12px;
+		color: #aaa;
+	}
+	.player {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.player input[type='range'] {
+		flex: 1;
+	}
+	.frame-num {
+		font-family: ui-monospace, monospace;
+		font-size: 11px;
+		color: #888;
+		min-width: 52px;
+		text-align: right;
+	}
+	.anim-export {
+		display: flex;
+		gap: 8px;
+	}
+	.primary {
+		background: #2f6f4f;
+		border-color: #3a8a63;
+		color: #eafff2;
+	}
+	.anim-err {
+		color: #d66;
+		font-size: 11px;
+		font-family: ui-monospace, monospace;
 	}
 	table.traits,
 	table.ringcounts {

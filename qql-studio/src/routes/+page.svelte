@@ -3,9 +3,11 @@
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import {
 		cancelSearch,
+		decodeSeed,
 		deleteSeedPng,
 		emptyChoices,
 		generateCandidates,
+		layoutSummary,
 		listPaletteColors,
 		listTraits,
 		saveSeedPng,
@@ -198,6 +200,9 @@
 	let statusMsg = $state('');
 	let error = $state<string | null>(null);
 	let openDetail = $state<Candidate | null>(null);
+	let inspectHex = $state('');
+	let inspectErr = $state<string | null>(null);
+	let inspecting = $state(false);
 	let unlisten: UnlistenFn | null = null;
 	let renderedCount = $state(0);
 	let renderRunStart = $state<number | null>(null);
@@ -559,6 +564,30 @@
 		choices = emptyChoices();
 	}
 
+	// Inspect any seed: decode its traits, fetch layout stats, and open the
+	// Detail view (where it can be rendered, animated, and exported).
+	async function inspectSeed() {
+		const raw = inspectHex.trim();
+		if (!raw || inspecting) return;
+		inspectErr = null;
+		inspecting = true;
+		try {
+			const traits = await decodeSeed(raw);
+			const seed = raw.startsWith('0x') ? raw : `0x${raw}`;
+			let stats = null;
+			try {
+				stats = await layoutSummary(seed);
+			} catch {
+				// non-fatal — Detail still renders + animates without layout stats
+			}
+			openDetail = { seed, traits, stats };
+		} catch (e) {
+			inspectErr = String(e);
+		} finally {
+			inspecting = false;
+		}
+	}
+
 	async function chooseSaveFolder() {
 		const picked = await openDialog({
 			directory: true,
@@ -661,6 +690,23 @@
 					{/each}
 				</select>
 			</label>
+			<div class="block">
+				<span class="label">Inspect a seed <small>render / animate any seed</small></span>
+				<div class="folder-row">
+					<input
+						type="text"
+						bind:value={inspectHex}
+						placeholder="0x… seed hex"
+						spellcheck="false"
+						autocomplete="off"
+						onkeydown={(e) => e.key === 'Enter' && inspectSeed()}
+					/>
+					<button class="ghost" onclick={inspectSeed} disabled={inspecting || !inspectHex.trim()}>
+						{inspecting ? '…' : 'View'}
+					</button>
+				</div>
+				{#if inspectErr}<div class="inspect-err">{inspectErr}</div>{/if}
+			</div>
 		</section>
 
 		<section class="group group-traits">
@@ -1647,6 +1693,12 @@
 		color: #666;
 		font-style: italic;
 		direction: ltr;
+	}
+	.inspect-err {
+		color: #d66;
+		font-size: 11px;
+		margin-top: 4px;
+		font-family: ui-monospace, monospace;
 	}
 	.grid {
 		display: grid;

@@ -68,6 +68,11 @@ fn main() {
             q.bottom_right,
             pct(q.bottom_right)
         );
+        let rb = summary.radius_buckets;
+        println!(
+            "  radii           small {} · medium {} · large {}   (large = >3% of canvas)",
+            rb.small, rb.medium, rb.large
+        );
         if let Some(fd) = summary.formation_dims {
             println!(
                 "  sections        {} × {}   ({} total)",

@@ -17,6 +17,9 @@ pub fn run() {
             commands::save_seed_png,
             commands::delete_seed_png,
             commands::export_seed_png,
+            commands::animation_preview,
+            commands::export_animation,
+            commands::cancel_animation,
             commands::layout_summary,
             commands::random_seed_for_address,
         ])
