@@ -58,6 +58,13 @@
 	const shadowsEnabled = $derived(
 		!choices.structure || choices.structure === 'Shadows'
 	);
+	// The flow-angle filter only applies to linear flow fields. Radial flows
+	// (Explosive/Spiral/Circular/RandomRadial) have no single line angle, so an
+	// angle range would reject every seed. We grey out + reset it when a radial
+	// flow is explicitly chosen; "Any" keeps it enabled (it implicitly keeps the
+	// linear seeds in range).
+	const RADIAL_FLOWS = ['Explosive', 'Spiral', 'Circular', 'RandomRadial'];
+	const angleApplies = $derived(!RADIAL_FLOWS.includes(choices.flowField ?? ''));
 	// Construct-only: traits are encoded directly into each seed. (The Search
 	// mode was removed from the UI; the backend still supports it.)
 	const mode: GenerateMode = 'construct';
@@ -116,14 +123,20 @@
 	let maxLarge = $state<number | null>(null);
 	let minAngle = $state<number>(0);
 	let maxAngle = $state<number>(90);
+	// When the angle filter doesn't apply (radial flow chosen), reset it to the
+	// full range so it reads as "no constraint" and can't silently reject seeds.
+	$effect(() => {
+		if (!angleApplies) {
+			minAngle = 0;
+			maxAngle = 90;
+		}
+	});
 	let cornerConcentration = $state<'' | 'TL' | 'TR' | 'BL' | 'BR' | 'AnyLeft' | 'AnyRight'>('');
 	let cornerRatio = $state<number>(1.5);
 	let minHorizontalSections = $state<number | null>(null);
 	let maxHorizontalSections = $state<number | null>(null);
 	let minVerticalSections = $state<number | null>(null);
 	let maxVerticalSections = $state<number | null>(null);
-	let minTotalSections = $state<number | null>(null);
-	let maxTotalSections = $state<number | null>(null);
 	// Formation point spacing (`step`) checkboxes, basis points of canvas width.
 	let fStep75 = $state<boolean>(false); // 0.75%
 	let fStep100 = $state<boolean>(false); // 1%
@@ -137,6 +150,27 @@
 	let fSkip50 = $state<boolean>(false); // 0.5
 	let minFormationChunks = $state<number | null>(null);
 	let maxFormationChunks = $state<number | null>(null);
+	// Actual chunks can't exceed the grid, whose largest size is (max H)×(max V).
+	// "no cap" on a section axis means up to 7 (the largest section value).
+	const maxAchievableChunks = $derived(
+		(maxHorizontalSections ?? 7) * (maxVerticalSections ?? 7)
+	);
+	const chunksImpossible = $derived(
+		formationEnabled &&
+			minFormationChunks != null &&
+			minFormationChunks > maxAchievableChunks
+	);
+	// Provably-impossible filter combinations, surfaced inline and blocked at
+	// Generate. Only deterministic impossibilities go here (not merely-rare ones).
+	function impossibleReasons(): string[] {
+		const reasons: string[] = [];
+		if (chunksImpossible) {
+			reasons.push(
+				`Actual chunks: minimum is ${minFormationChunks}, but with Horizontal ≤ ${maxHorizontalSections ?? 7} and Vertical ≤ ${maxVerticalSections ?? 7}, the most chunks a Formation can have is ${maxAchievableChunks}. Lower the minimum, or raise the section limits.`
+			);
+		}
+		return reasons;
+	}
 	let minRingBands = $state<number | null>(null);
 	let maxRingBands = $state<number | null>(null);
 	let allowOrbitalSplit1 = $state<boolean>(false);
@@ -243,14 +277,6 @@
 	// Formation grid: num_horizontal/vertical_steps are weighted choices from
 	// {1,2,3,4,5,7} (note: no 6). See qqlrs-main/src/layouts.rs `formation()`.
 	const FORMATION_SECTION_VALUES = [1, 2, 3, 4, 5, 7];
-	// Total = H × V, so the reachable totals are the distinct products of the
-	// section sets above.
-	const FORMATION_TOTAL_VALUES = (() => {
-		const set = new Set<number>();
-		for (const h of FORMATION_SECTION_VALUES)
-			for (const v of FORMATION_SECTION_VALUES) set.add(h * v);
-		return [...set].sort((a, b) => a - b);
-	})();
 
 	onMount(async () => {
 		try {
@@ -323,6 +349,12 @@
 	async function onGenerate() {
 		error = null;
 		statusMsg = '';
+		// Bail before churning attempts on a provably-impossible combination.
+		const reasons = impossibleReasons();
+		if (reasons.length > 0) {
+			error = `This combination can't produce results:\n• ${reasons.join('\n• ')}`;
+			return;
+		}
 		progress = null;
 		results = [];
 		renderedCount = 0;
@@ -348,8 +380,6 @@
 				maxHorizontalSections: maxHorizontalSections ?? undefined,
 				minVerticalSections: minVerticalSections ?? undefined,
 				maxVerticalSections: maxVerticalSections ?? undefined,
-				minTotalSections: minTotalSections ?? undefined,
-				maxTotalSections: maxTotalSections ?? undefined,
 				allowedFormationStepBp: (() => {
 					const list = [
 						fStep75 ? 75 : null,
@@ -476,8 +506,6 @@
 				charFilter.maxHorizontalSections = undefined;
 				charFilter.minVerticalSections = undefined;
 				charFilter.maxVerticalSections = undefined;
-				charFilter.minTotalSections = undefined;
-				charFilter.maxTotalSections = undefined;
 				charFilter.allowedFormationStepBp = undefined;
 				charFilter.allowedFormationSkipBp = undefined;
 				charFilter.minFormationChunks = undefined;
@@ -505,7 +533,7 @@
 			}
 			const isCharFilterActive =
 				Object.values(charFilter).some((v) => v !== undefined && v !== null);
-			const angleActive = minAngle > 0 || maxAngle < 90;
+			const angleActive = angleApplies && (minAngle > 0 || maxAngle < 90);
 			const outcome = await generateCandidates({
 				address,
 				choices,
@@ -945,7 +973,15 @@
 				<small class="hint">requires layout</small>
 			</div>
 
-			<div class="subhead">Flow angle <small>linear flows only</small></div>
+			<fieldset class="struct-group" disabled={!angleApplies}>
+			<div class="subhead">
+				Flow angle
+				{#if angleApplies}
+					<small>linear flows only</small>
+				{:else}
+					<small class="locked">n/a — radial flow has no line angle</small>
+				{/if}
+			</div>
 			<div class="angle-head">
 				<span class="angle-readout">{minAngle}° – {maxAngle}°</span>
 				<button
@@ -993,6 +1029,7 @@
 				<span>45° diagonal</span>
 				<span>90° vertical</span>
 			</div>
+			</fieldset>
 
 			<div class="subhead">Corner concentration</div>
 			<label class="block">
@@ -1082,24 +1119,6 @@
 					{/each}
 				</select>
 			</div>
-			<div class="bucket-row">
-				<div class="bucket-label">
-					<strong>Total</strong>
-					<small>H × V</small>
-				</div>
-				<select bind:value={minTotalSections}>
-					<option value={null}>min</option>
-					{#each FORMATION_TOTAL_VALUES as v}
-						<option value={v}>{v}</option>
-					{/each}
-				</select>
-				<select bind:value={maxTotalSections}>
-					<option value={null}>max</option>
-					{#each FORMATION_TOTAL_VALUES as v}
-						<option value={v}>{v}</option>
-					{/each}
-				</select>
-			</div>
 			<div class="splits-row">
 				<div class="splits-label">
 					<strong>Point spacing</strong>
@@ -1130,9 +1149,16 @@
 					<strong>Actual chunks</strong>
 					<small>placed after skips</small>
 				</div>
-				<input type="number" bind:value={minFormationChunks} placeholder="min" min="0" />
-				<input type="number" bind:value={maxFormationChunks} placeholder="max" min="0" />
+				<input type="number" bind:value={minFormationChunks} placeholder="min" min="1" max="49" />
+				<input type="number" bind:value={maxFormationChunks} placeholder="max" min="1" max="49" />
 			</div>
+			{#if chunksImpossible}
+				<div class="combo-warn">
+					⚠ With Horizontal ≤ {maxHorizontalSections ?? 7} and Vertical ≤ {maxVerticalSections ??
+						7}, the most chunks possible is {maxAchievableChunks} — a minimum above that
+					matches nothing.
+				</div>
+			{/if}
 
 			</fieldset>
 
@@ -1154,13 +1180,15 @@
 					type="number"
 					bind:value={minRingBands}
 					placeholder="min"
-					min="1"
+					min="3"
+					max="61"
 				/>
 				<input
 					type="number"
 					bind:value={maxRingBands}
 					placeholder="max"
-					min="1"
+					min="3"
+					max="61"
 				/>
 			</div>
 			<div class="splits-row">
@@ -2091,6 +2119,16 @@
 		padding: 6px 8px;
 		background: rgba(220, 80, 80, 0.1);
 		border-radius: 4px;
+		white-space: pre-line;
+	}
+	.combo-warn {
+		color: #c08a5a;
+		font-size: 11px;
+		margin-top: 4px;
+		padding: 5px 7px;
+		background: rgba(192, 138, 90, 0.12);
+		border-radius: 4px;
+		line-height: 1.4;
 	}
 	.info {
 		color: #aaa;

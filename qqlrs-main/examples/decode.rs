@@ -80,6 +80,12 @@ fn main() {
                 fd.vertical_sections,
                 fd.horizontal_sections * fd.vertical_sections
             );
+            println!(
+                "                  point spacing {:.2}% · skip odds {:.1} · actual chunks {}",
+                fd.step_frac * 100.0,
+                fd.skip_odds,
+                fd.actual_chunks
+            );
         }
         if let Some(oi) = summary.orbital_info {
             let used: Vec<String> = (0..3)
