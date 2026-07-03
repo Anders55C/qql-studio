@@ -198,6 +198,18 @@ fn orbital(rng: &mut Rng) -> (StartPointGroups, OrbitalInfo) {
         if (1..=3).contains(&splits_u) {
             splits_used[(splits_u - 1) as usize] = true;
         }
+        // Debug-only per-band geometry dump (set QQL_DUMP_BANDS=1). Used to build
+        // overlay diagrams; has no effect on rendering or the golden tests.
+        if std::env::var("QQL_DUMP_BANDS").is_ok() {
+            eprintln!(
+                "BAND idx={} inner_frac={:.5} outer_frac={:.5} splits={} offset_rad={:.5}",
+                ring_bands - 1,
+                group_radius / w(1.0),
+                (group_radius + radial_group_step) / w(1.0),
+                splits_u,
+                split_offset
+            );
+        }
         let split_len = pi(2.0) / num_splits as f64;
 
         let mut theta = split_offset;

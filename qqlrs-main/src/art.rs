@@ -972,7 +972,8 @@ impl Points {
 
         let mut all_points = Vec::new();
         let mut group_sizes = Vec::with_capacity(grouped_flow_lines.0.len());
-        for group in grouped_flow_lines.0 {
+        let dump_points = std::env::var("QQL_DUMP_POINTS").is_ok();
+        for (group_idx, group) in grouped_flow_lines.0.into_iter().enumerate() {
             if let Some(d) = deadline {
                 if Instant::now() >= d {
                     return None;
@@ -1009,6 +1010,19 @@ impl Points {
             }
             let new_size = all_points.len();
             group_sizes.push(new_size - old_size);
+            // Debug-only dump of final (flowed) point positions tagged by wedge
+            // index (set QQL_DUMP_POINTS=1). Pairs with QQL_DUMP_BANDS to trace
+            // the actual warped ring bands. No effect on rendering / golden tests.
+            if dump_points {
+                for p in &all_points[old_size..new_size] {
+                    eprintln!(
+                        "POINT g={} xf={:.5} yf={:.5}",
+                        group_idx,
+                        p.position.0 / w(1.0),
+                        p.position.1 / h(1.0)
+                    );
+                }
+            }
         }
         Some((Points(all_points), GroupSizes(group_sizes)))
     }
@@ -1846,6 +1860,26 @@ pub fn draw<F: FnMut(Frame)>(
     let flow_field = FlowField::build(&flow_field_spec, &traits, &mut rng);
     eprintln!("built flow field");
     let ignore_flow_field = IgnoreFlowField::build(&flow_field_spec, &mut rng);
+    // Debug-only flow-field export (set QQL_DUMP_FLOWFIELD=<path>). Writes the
+    // resolved theta grid + field constants so external tooling can replicate
+    // the exact flow integration (e.g. trace warped band boundaries). No effect
+    // on rendering or the golden tests.
+    if let Ok(path) = std::env::var("QQL_DUMP_FLOWFIELD") {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let _ = writeln!(
+            s,
+            "META vw={} vh={} lx={} ty={} spc={} cols={} rows={} step={}",
+            VIRTUAL_W, VIRTUAL_H, LX, TY, SPC, FLOW_FIELD_COLS, FLOW_FIELD_ROWS, w(0.002)
+        );
+        for xi in 0..FLOW_FIELD_COLS {
+            for yi in 0..FLOW_FIELD_ROWS {
+                let _ = write!(s, "{:.5} ", flow_field.0[xi][yi]);
+            }
+            s.push('\n');
+        }
+        let _ = std::fs::write(&path, s);
+    }
     let (start_points, structure_info) =
         StartPointGroups::build_with_info(traits.structure, &mut rng);
     let formation_dims_summary: Option<FormationDims> = structure_info.formation;
