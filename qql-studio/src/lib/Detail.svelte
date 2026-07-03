@@ -110,8 +110,14 @@
 		}, delayMs());
 	}
 
+	// A user-initiated cancel surfaces as an error string from the backend;
+	// don't show it as a failure.
+	const isCancelled = (e: unknown) => /cancelled/i.test(String(e));
+
 	async function buildAnimation() {
-		if (building) return;
+		// Also guard against `exporting`: build and export share one backend
+		// cancel flag and one progress channel, so never run both at once.
+		if (building || exporting) return;
 		stopPlayer();
 		building = true;
 		animError = null;
@@ -119,11 +125,16 @@
 		frames = null;
 		frameIdx = 0;
 		try {
-			frames = await animationPreview(candidate.seed, animSize, animFrameCount);
+			frames = await animationPreview(
+				candidate.seed,
+				animSize,
+				animFrameCount,
+				candidate.stats?.numPoints
+			);
 			frameIdx = 0;
 			startPlayer();
 		} catch (e) {
-			animError = String(e);
+			if (!isCancelled(e)) animError = String(e);
 		} finally {
 			building = false;
 			animProgress = null;
@@ -131,7 +142,7 @@
 	}
 
 	async function exportApng() {
-		if (exporting) return;
+		if (exporting || building) return;
 		const dest = await saveDialog({
 			defaultPath: `${candidate.seed}_anim.png`,
 			filters: [{ name: 'Animated PNG', extensions: ['png'] }]
@@ -148,10 +159,11 @@
 				'apng',
 				delayMs(),
 				animHoldMs,
-				dest
+				dest,
+				candidate.stats?.numPoints
 			);
 		} catch (e) {
-			animError = `Export failed: ${e}`;
+			if (!isCancelled(e)) animError = `Export failed: ${e}`;
 		} finally {
 			exporting = false;
 			animProgress = null;
@@ -159,7 +171,7 @@
 	}
 
 	async function exportFrames() {
-		if (exporting) return;
+		if (exporting || building) return;
 		const folder = await openDialog({
 			directory: true,
 			title: 'Choose a folder for the frame sequence'
@@ -177,10 +189,11 @@
 				'frames',
 				delayMs(),
 				animHoldMs,
-				dest
+				dest,
+				candidate.stats?.numPoints
 			);
 		} catch (e) {
-			animError = `Export failed: ${e}`;
+			if (!isCancelled(e)) animError = `Export failed: ${e}`;
 		} finally {
 			exporting = false;
 			animProgress = null;
@@ -193,6 +206,9 @@
 		});
 	});
 	onDestroy(() => {
+		// Closing the panel mid-render would otherwise leave the backend
+		// burning CPU on frames nobody will consume.
+		if (building || exporting) cancelAnimation();
 		stopPlayer();
 		unlistenProg?.();
 	});
@@ -233,7 +249,7 @@
 ></div>
 <div class="panel" role="dialog" aria-modal="true">
 	<div class="art-pane">
-		{#if frames}
+		{#if frames && showAnim}
 			<img src={frames[frameIdx]} alt="QQL animation frame" />
 		{:else if pngUrl}
 			<img src={pngUrl} alt="QQL render" />
@@ -283,7 +299,15 @@
 			<button onclick={saveAs} disabled={exporting}>
 				{exporting ? 'Saving…' : 'Save As…'}
 			</button>
-			<button class:on={showAnim} onclick={() => (showAnim = !showAnim)}>
+			<button
+				class:on={showAnim}
+				onclick={() => {
+					showAnim = !showAnim;
+					// Collapsing hides the player controls, so also return the
+					// art pane to the static render rather than a frozen frame.
+					if (!showAnim) stopPlayer();
+				}}
+			>
 				{showAnim ? '▾ Animate' : '▸ Animate'}
 			</button>
 		</div>
@@ -327,7 +351,7 @@
 						<button onclick={cancelAnimation}>cancel</button>
 					</div>
 				{:else}
-					<button class="primary" onclick={buildAnimation}>
+					<button class="primary" onclick={buildAnimation} disabled={exporting}>
 						{frames ? 'Re-build animation' : 'Build animation'}
 					</button>
 				{/if}
@@ -347,10 +371,10 @@
 						<span class="frame-num">{frameIdx + 1}/{frames.length}</span>
 					</div>
 					<div class="anim-export">
-						<button onclick={exportApng} disabled={exporting}>
+						<button onclick={exportApng} disabled={exporting || building}>
 							{exporting ? 'Exporting…' : 'Export APNG'}
 						</button>
-						<button onclick={exportFrames} disabled={exporting}>Export frames…</button>
+						<button onclick={exportFrames} disabled={exporting || building}>Export frames…</button>
 					</div>
 					{#if exporting && animProgress}
 						<div class="anim-status">

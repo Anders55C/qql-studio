@@ -219,8 +219,20 @@ export const exportSeedPng = (seed: string, width: number, path: string) =>
 	invoke<string>('export_seed_png', { seedHex: seed, width, path });
 
 export type AnimationProgress = { done: number; total: number; phase: string };
-export const animationPreview = (seed: string, width: number, frames: number) =>
-	invoke<string[]>('animation_preview', { seedHex: seed, width, frames });
+// `numPoints`, when already known from layout stats, saves the backend a full
+// (possibly slow) layout pass it would otherwise run just to count points.
+export const animationPreview = (
+	seed: string,
+	width: number,
+	frames: number,
+	numPoints?: number
+) =>
+	invoke<string[]>('animation_preview', {
+		seedHex: seed,
+		width,
+		frames,
+		numPoints: numPoints ?? null
+	});
 export const exportAnimation = (
 	seed: string,
 	width: number,
@@ -228,7 +240,8 @@ export const exportAnimation = (
 	format: 'apng' | 'frames',
 	delayMs: number,
 	holdMs: number,
-	dest: string
+	dest: string,
+	numPoints?: number
 ) =>
 	invoke<string>('export_animation', {
 		seedHex: seed,
@@ -237,7 +250,8 @@ export const exportAnimation = (
 		format,
 		delayMs,
 		holdMs,
-		dest
+		dest,
+		numPoints: numPoints ?? null
 	});
 export const cancelAnimation = () => invoke<void>('cancel_animation');
 export const layoutSummary = (seedHex: string) =>

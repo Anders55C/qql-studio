@@ -162,12 +162,35 @@
 	);
 	// Provably-impossible filter combinations, surfaced inline and blocked at
 	// Generate. Only deterministic impossibilities go here (not merely-rare ones).
+	// (Called from onGenerate, so it may reference filter state declared below.)
 	function impossibleReasons(): string[] {
 		const reasons: string[] = [];
 		if (chunksImpossible) {
 			reasons.push(
 				`Actual chunks: minimum is ${minFormationChunks}, but with Horizontal ≤ ${maxHorizontalSections ?? 7} and Vertical ≤ ${maxVerticalSections ?? 7}, the most chunks a Formation can have is ${maxAchievableChunks}. Lower the minimum, or raise the section limits.`
 			);
+		}
+		// Any min > max range matches nothing. Only check pairs whose section
+		// applies to the chosen Structure — greyed-out filters are dropped from
+		// the request anyway, so a stale inverted range there is harmless.
+		const minMaxPairs: [number | null, number | null, string, boolean][] = [
+			[minPoints, maxPoints, 'Points', true],
+			[minColors, maxColors, 'Colors', true],
+			[minSmall, maxSmall, 'Small radius bucket', true],
+			[minMedium, maxMedium, 'Medium radius bucket', true],
+			[minLarge, maxLarge, 'Large radius bucket', true],
+			[minSplatterOdds, maxSplatterOdds, 'Splatter odds', true],
+			[minHorizontalSections, maxHorizontalSections, 'Horizontal sections', formationEnabled],
+			[minVerticalSections, maxVerticalSections, 'Vertical sections', formationEnabled],
+			[minFormationChunks, maxFormationChunks, 'Actual chunks', formationEnabled],
+			[minRingBands, maxRingBands, 'Ring bands', orbitalEnabled],
+			[minSplitOffsetDeg, maxSplitOffsetDeg, 'Split offset', orbitalEnabled],
+			[minShadowsActualCircles, maxShadowsActualCircles, 'Actual circles', shadowsEnabled]
+		];
+		for (const [min, max, label, applies] of minMaxPairs) {
+			if (applies && min != null && max != null && min > max) {
+				reasons.push(`${label}: minimum (${min}) is greater than maximum (${max}).`);
+			}
 		}
 		return reasons;
 	}
@@ -1073,14 +1096,15 @@
 					<label class="splits-check"><input type="checkbox" bind:checked={cl850} /><span>850</span></label>
 				</div>
 			</div>
+		</section>
 
-			<fieldset class="struct-group" disabled={!formationEnabled}>
-				<div class="subhead">
-					Formation structure
+		<fieldset class="struct-group struct-card struct-formation" disabled={!formationEnabled}>
+				<div class="section-head">
+					<h2>Formation structure</h2>
 					{#if formationEnabled}
-						<small>Formation pieces only</small>
+						<small class="hint">requires layout</small>
 					{:else}
-						<small class="locked">n/a — Structure is {choices.structure}</small>
+						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
 				</div>
 			<div class="bucket-row">
@@ -1160,15 +1184,15 @@
 				</div>
 			{/if}
 
-			</fieldset>
+		</fieldset>
 
-			<fieldset class="struct-group" disabled={!orbitalEnabled}>
-				<div class="subhead">
-					Orbital structure
+		<fieldset class="struct-group struct-card struct-orbital" disabled={!orbitalEnabled}>
+				<div class="section-head">
+					<h2>Orbital structure</h2>
 					{#if orbitalEnabled}
-						<small>Orbital pieces only</small>
+						<small class="hint">requires layout</small>
 					{:else}
-						<small class="locked">n/a — Structure is {choices.structure}</small>
+						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
 				</div>
 			<div class="bucket-row">
@@ -1325,15 +1349,15 @@
 				/>
 			</div>
 
-			</fieldset>
+		</fieldset>
 
-			<fieldset class="struct-group" disabled={!shadowsEnabled}>
-				<div class="subhead">
-					Shadows structure
+		<fieldset class="struct-group struct-card struct-shadows" disabled={!shadowsEnabled}>
+				<div class="section-head">
+					<h2>Shadows structure</h2>
 					{#if shadowsEnabled}
-						<small>Shadows pieces only</small>
+						<small class="hint">requires layout</small>
 					{:else}
-						<small class="locked">n/a — Structure is {choices.structure}</small>
+						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
 				</div>
 			<div class="splits-row">
@@ -1395,8 +1419,7 @@
 					<option value="in">Inside → out</option>
 				</select>
 			</label>
-			</fieldset>
-		</section>
+		</fieldset>
 
 		<section class="group group-generation">
 			<div class="section-head">
@@ -1929,6 +1952,26 @@
 	}
 	fieldset.struct-group:disabled {
 		opacity: 0.4;
+	}
+	/* Each structure is its own top-level card, styled to match section.group
+	   (they're fieldsets, not sections, so the whole card — edge included —
+	   dims via :disabled when its Structure isn't the chosen one). */
+	fieldset.struct-card {
+		border-left: 3px solid #444;
+		border-radius: 8px;
+		padding: 12px 14px 14px;
+	}
+	fieldset.struct-formation {
+		background: #1a1812;
+		border-left-color: #d1b13c;
+	}
+	fieldset.struct-orbital {
+		background: #12161e;
+		border-left-color: #5a8de0;
+	}
+	fieldset.struct-shadows {
+		background: #15181b;
+		border-left-color: #7f96ad;
 	}
 	.bg-preview {
 		display: flex;

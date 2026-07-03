@@ -1096,13 +1096,16 @@ pub fn cancel_animation() {
 }
 
 /// Render an animation and return the frames as PNG data URLs for the in-app
-/// player. Width is capped to a preview-friendly size.
+/// player. Width is capped to a preview-friendly size. `num_points` is the
+/// already-known layout point count, if the frontend has stats (saves a
+/// layout pass that would otherwise run just to size the frame step).
 #[tauri::command]
 pub async fn animation_preview(
     app: AppHandle,
     seed_hex: String,
     width: i32,
     frames: usize,
+    num_points: Option<usize>,
 ) -> Result<Vec<String>, String> {
     CANCEL_ANIM.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1113,6 +1116,7 @@ pub async fn animation_preview(
             &bytes,
             w,
             frames,
+            num_points,
             |done, total| {
                 let _ = app2.emit(
                     "animation-progress",
@@ -1146,6 +1150,7 @@ pub async fn export_animation(
     delay_ms: u16,
     hold_ms: u16,
     dest: String,
+    num_points: Option<usize>,
 ) -> Result<String, String> {
     CANCEL_ANIM.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1156,6 +1161,7 @@ pub async fn export_animation(
             &bytes,
             w,
             frames,
+            num_points,
             |done, total| {
                 let _ = app2.emit(
                     "animation-progress",
@@ -1287,7 +1293,8 @@ mod tests {
         );
         let cancel = AtomicBool::new(false);
         let frames =
-            render::render_animation_frames(&seed, 240, 20, |_done, _total| {}, &cancel).unwrap();
+            render::render_animation_frames(&seed, 240, 20, None, |_done, _total| {}, &cancel)
+                .unwrap();
         assert!(
             frames.len() > 2,
             "expected several frames, got {}",

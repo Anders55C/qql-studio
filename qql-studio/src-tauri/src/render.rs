@@ -354,15 +354,25 @@ fn drawtarget_to_png_bytes(dt: &raqote::DrawTarget) -> Result<Vec<u8>> {
 /// `cancel` is polled between frames (best-effort: the underlying `draw()` can't
 /// be interrupted mid-frame, so this stops collecting rather than instantly
 /// freeing the CPU).
+///
+/// `known_num_points`: the layout's point count if the caller already has it
+/// (e.g. from earlier layout stats). Passing it skips a full layout pass that
+/// exists only to size the frame step — on slow seeds that's nearly half the
+/// total time. `draw()` recomputes the real layout either way, so a stale or
+/// slightly-off count only shifts the frame pacing, never the output.
 pub fn render_animation_frames(
     seed: &[u8; 32],
     width: i32,
     target_frames: usize,
+    known_num_points: Option<usize>,
     mut on_progress: impl FnMut(usize, usize),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<Vec<u8>>> {
     use std::sync::atomic::Ordering;
-    let num_points = layout_only(seed).num_points;
+    let num_points = match known_num_points {
+        Some(n) if n > 0 => n,
+        _ => layout_only(seed).num_points,
+    };
     let frames_wanted = target_frames.clamp(2, 600);
     let step = ((num_points / frames_wanted).max(1)) as u32;
     let total_est = num_points / step.max(1) as usize + 2;
