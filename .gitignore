@@ -24,3 +24,6 @@ qql-studio/src-tauri/gen/
 # Editor / misc
 *.swp
 *~
+
+# Session working files (diagram overlays, drafts)
+scratchpad/
