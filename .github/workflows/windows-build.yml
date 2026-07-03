@@ -1,0 +1,43 @@
+# Builds a Windows installer for QQL Studio on a GitHub-hosted runner.
+# Trigger manually from the Actions tab (workflow_dispatch) — the installer
+# lands as a downloadable artifact on the run page. Builds are unsigned, so
+# Windows SmartScreen will warn testers: More info -> Run anyway.
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: qql-studio/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qql-studio/src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: qql-studio
+
+      - name: Build Tauri app
+        run: npm run tauri build
+        working-directory: qql-studio
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: qql-studio-windows
+          if-no-files-found: error
+          path: |
+            qql-studio/src-tauri/target/release/bundle/nsis/*.exe
+            qql-studio/src-tauri/target/release/bundle/msi/*.msi
