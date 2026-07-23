@@ -22,6 +22,7 @@
 	} from '$lib/api';
 	import { open as openDialog } from '@tauri-apps/plugin-dialog';
 	import Tile from '$lib/Tile.svelte';
+	import FilterInfo from '$lib/FilterInfo.svelte';
 	import Detail from '$lib/Detail.svelte';
 	import { setRenderConcurrency } from '$lib/renderQueue';
 
@@ -65,6 +66,15 @@
 	// linear seeds in range).
 	const RADIAL_FLOWS = ['Explosive', 'Spiral', 'Circular', 'RandomRadial'];
 	const angleApplies = $derived(!RADIAL_FLOWS.includes(choices.flowField ?? ''));
+	// Horizontal/Diagonal/Vertical are pinned to a single angle, so the range
+	// slider can't narrow anything — surface that rather than silently letting
+	// the user set a range that does nothing. RandomLinear is the free one.
+	const FIXED_ANGLES: Record<string, number> = {
+		Horizontal: 0,
+		Diagonal: 45,
+		Vertical: 90
+	};
+	const fixedAngle = $derived(FIXED_ANGLES[choices.flowField ?? '']);
 	// Construct-only: traits are encoded directly into each seed. (The Search
 	// mode was removed from the UI; the backend still supports it.)
 	const mode: GenerateMode = 'construct';
@@ -999,8 +1009,9 @@
 			<fieldset class="struct-group" disabled={!angleApplies}>
 			<div class="subhead">
 				Flow angle
+				{@render flowAngleInfo()}
 				{#if angleApplies}
-					<small>linear flows only</small>
+					<small>best with RandomLinear</small>
 				{:else}
 					<small class="locked">n/a — radial flow has no line angle</small>
 				{/if}
@@ -1052,6 +1063,12 @@
 				<span>45° diagonal</span>
 				<span>90° vertical</span>
 			</div>
+			{#if fixedAngle !== undefined}
+				<div class="angle-note">
+					{choices.flowField} is fixed at {fixedAngle}° — narrowing this range won't
+					change what you get. Use RandomLinear for angles in between.
+				</div>
+			{/if}
 			</fieldset>
 
 			<div class="subhead">Corner concentration</div>
@@ -1100,7 +1117,7 @@
 
 		<fieldset class="struct-group struct-card struct-formation" disabled={!formationEnabled}>
 				<div class="section-head">
-					<h2>Formation structure</h2>
+					<h2>Formation structure{@render formationInfo()}</h2>
 					{#if formationEnabled}
 						<small class="hint">requires layout</small>
 					{:else}
@@ -1109,7 +1126,7 @@
 				</div>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Horizontal</strong>
+					<strong>Horizontal{@render formationSectionsInfo()}</strong>
 					<small>columns</small>
 				</div>
 				<select bind:value={minHorizontalSections}>
@@ -1127,7 +1144,7 @@
 			</div>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Vertical</strong>
+					<strong>Vertical{@render formationSectionsInfo()}</strong>
 					<small>rows</small>
 				</div>
 				<select bind:value={minVerticalSections}>
@@ -1145,7 +1162,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Point spacing</strong>
+					<strong>Point spacing{@render formationSpacingInfo()}</strong>
 					<small>gap between points (% canvas)</small>
 				</div>
 				<div class="splits-checks">
@@ -1158,7 +1175,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Skip odds</strong>
+					<strong>Skip odds{@render formationSkipInfo()}</strong>
 					<small>chance each chunk is dropped</small>
 				</div>
 				<div class="splits-checks">
@@ -1170,7 +1187,7 @@
 			</div>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Actual chunks</strong>
+					<strong>Actual chunks{@render formationChunksInfo()}</strong>
 					<small>placed after skips</small>
 				</div>
 				<input type="number" bind:value={minFormationChunks} placeholder="min" min="1" max="49" />
@@ -1188,7 +1205,7 @@
 
 		<fieldset class="struct-group struct-card struct-orbital" disabled={!orbitalEnabled}>
 				<div class="section-head">
-					<h2>Orbital structure</h2>
+					<h2>Orbital structure{@render orbitalInfo()}</h2>
 					{#if orbitalEnabled}
 						<small class="hint">requires layout</small>
 					{:else}
@@ -1197,7 +1214,7 @@
 				</div>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Ring bands</strong>
+					<strong>Ring bands{@render ringBandsInfo()}</strong>
 					<small>radial bands</small>
 				</div>
 				<input
@@ -1217,7 +1234,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Allowed splits</strong>
+					<strong>Allowed splits{@render allowedSplitsInfo()}</strong>
 					<small>no band uses values outside checked</small>
 				</div>
 				<div class="splits-checks">
@@ -1237,7 +1254,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Required splits</strong>
+					<strong>Required splits{@render requiredSplitsInfo()}</strong>
 					<small>each checked must appear in some band</small>
 				</div>
 				<div class="splits-checks">
@@ -1257,7 +1274,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Center X</strong>
+					<strong>Center X{@render orbitalCenterInfo()}</strong>
 					<small>horizontal position categories</small>
 				</div>
 				<div class="splits-checks">
@@ -1281,7 +1298,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Center Y</strong>
+					<strong>Center Y{@render orbitalCenterInfo()}</strong>
 					<small>vertical position categories</small>
 				</div>
 				<div class="splits-checks">
@@ -1305,7 +1322,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Point spacing</strong>
+					<strong>Point spacing{@render orbitalSpacingInfo()}</strong>
 					<small>distance along each ring (% canvas)</small>
 				</div>
 				<div class="splits-checks">
@@ -1319,7 +1336,7 @@
 			</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Band thickness</strong>
+					<strong>Band thickness{@render bandThicknessInfo()}</strong>
 					<small>ring band thickness (% canvas)</small>
 				</div>
 				<div class="splits-checks">
@@ -1330,7 +1347,7 @@
 			</div>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Split offset</strong>
+					<strong>Split offset{@render splitOffsetInfo()}</strong>
 					<small>rotation only · rarely useful</small>
 				</div>
 				<input
@@ -1353,7 +1370,7 @@
 
 		<fieldset class="struct-group struct-card struct-shadows" disabled={!shadowsEnabled}>
 				<div class="section-head">
-					<h2>Shadows structure</h2>
+					<h2>Shadows structure{@render shadowsInfo()}</h2>
 					{#if shadowsEnabled}
 						<small class="hint">requires layout</small>
 					{:else}
@@ -1362,7 +1379,7 @@
 				</div>
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Target circles</strong>
+					<strong>Target circles{@render shadowsTargetInfo()}</strong>
 					<small>algorithm's target count</small>
 				</div>
 				<div class="splits-checks">
@@ -1375,7 +1392,7 @@
 				</div>
 			</div>
 			<label class="block">
-				<span class="label">Fill style</span>
+				<span class="label">Fill style{@render shadowsFillInfo()}</span>
 				<select bind:value={shadowsFillStyle}>
 					<option value="">Any</option>
 					<option value="all_radial">All radial (concentric rings)</option>
@@ -1385,7 +1402,7 @@
 			</label>
 			<div class="bucket-row">
 				<div class="bucket-label">
-					<strong>Actual circles</strong>
+					<strong>Actual circles{@render shadowsActualInfo()}</strong>
 					<small>after collision rejection</small>
 				</div>
 				<input
@@ -1404,7 +1421,7 @@
 				/>
 			</div>
 			<label class="block">
-				<span class="label">Square direction <small>subtle · rarely useful</small></span>
+				<span class="label">Square direction{@render shadowsSquareDirInfo()} <small>subtle · rarely useful</small></span>
 				<select bind:value={shadowsColumnar}>
 					<option value="">Any</option>
 					<option value="col">Column-major</option>
@@ -1412,7 +1429,7 @@
 				</select>
 			</label>
 			<label class="block">
-				<span class="label">Radial direction <small>subtle · rarely useful</small></span>
+				<span class="label">Radial direction{@render shadowsRadialDirInfo()} <small>subtle · rarely useful</small></span>
 				<select bind:value={shadowsRadialDir}>
 					<option value="">Any</option>
 					<option value="out">Outside → in</option>
@@ -1607,6 +1624,416 @@
 		/>
 	{/if}
 </div>
+
+<!-- Filter help content. Each snippet renders a FilterInfo "i" button plus the
+     popup body for one filter; keeping them together makes the copy easy to
+     review and extend as more filters get explanations. -->
+{#snippet flowAngleInfo()}
+	<FilterInfo title="Flow angle">
+		<p>
+			<strong>Which way the piece's lines run.</strong> A linear flow field pushes every
+			dot-trail along one shared direction. This slider sets the range of that direction,
+			from <strong>0° (horizontal)</strong> through <strong>45° (diagonal)</strong> to
+			<strong>90° (vertical)</strong>.
+		</p>
+		<p>
+			<strong>Most useful with Flow field = RandomLinear.</strong> Horizontal, Diagonal and
+			Vertical are locked to exactly 0°, 45° and 90°, so the trait itself already tells you
+			their angle — there's nothing left to narrow. RandomLinear lands on any angle in
+			between, so this is the only way to reach something like "near-vertical, but tilted".
+		</p>
+		<p>
+			Radial flows (Explosive, Spiral, Circular, RandomRadial) curve around a centre and
+			have no single angle, so the slider greys out when you pin one.
+		</p>
+		<p>
+			<strong>Watch out with Flow field = Any:</strong> the slider stays active, and because
+			radial pieces have no angle to test, narrowing the range at all silently excludes
+			<em>every</em> radial seed. Leave it at the full 0–90° if you want radials in the mix.
+		</p>
+		<p>
+			Note this is the flow field's <em>underlying</em> angle. Turbulence bends the actual
+			lines away from it, so on High turbulence the visible streaks can wander well off the
+			nominal angle.
+		</p>
+		<div class="tip">
+			<strong>Hunting recursions?</strong> Set Flow field to RandomLinear and narrow the
+			angle to 43–47°. Recursions turn up outside that band too, but they're far more
+			common inside it.
+		</div>
+	</FilterInfo>
+{/snippet}
+
+{#snippet formationInfo()}
+	<FilterInfo title="Formation structure">
+		<p>
+			<strong>Formation pieces are built as a grid of rectangular chunks.</strong> Each chunk
+			is filled with its own dense lattice of dots, and the colour can switch at chunk
+			borders — so the piece reads as a patchwork rather than one continuous field.
+		</p>
+		<p>
+			The grid is laid out <em>before</em> the flow field bends it, so on turbulent pieces
+			the seams turn wavy rather than straight.
+		</p>
+		<p>
+			These filters only match Formation pieces, so they grey out when you pin a different
+			Structure.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet formationSectionsInfo()}
+	<FilterInfo title="Horizontal & Vertical sections">
+		<p>
+			<strong>How many columns and rows the grid is divided into.</strong> Horizontal =
+			columns, Vertical = rows. Each is picked independently from
+			<strong>1, 2, 3, 4, 5 or 7</strong> — never 6.
+		</p>
+		<p>
+			A 1×1 piece is one seamless field. Higher counts give a visible patchwork, with more
+			seams where the colour and the dot lattice can change.
+		</p>
+		<p>
+			<strong>Low counts dominate.</strong> Horizontal is 1 about 47% of the time, Vertical
+			about 33%; a 7 on either axis turns up only ~3–4% of the time. Demanding high counts
+			on both axes gets rare fast — 7×7 is roughly 1 seed in 800, so expect a lot of
+			attempts.
+		</p>
+		<p>
+			The grid overshoots the canvas on every side, so the outermost chunks are partly
+			cropped — a "3 column" piece shows three columns' worth of structure, but the outer
+			two bleed off the edges.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet formationSpacingInfo()}
+	<FilterInfo title="Point spacing (Formation)">
+		<p>
+			<strong>How tightly the dots are packed inside each chunk</strong> — the gap between
+			neighbouring points, as a percentage of canvas width. Small values give a dense,
+			carpet-like fill; large values give a sparse scatter.
+		</p>
+		<p>
+			Checking several boxes matches seeds using <em>any</em> of those values. Leaving them
+			all unchecked means no constraint.
+		</p>
+		<p>
+			<strong>The sparse values are rare:</strong> 0.75% and 1% together account for about
+			three quarters of seeds, 2% for a quarter, while 4% and 8% are roughly 2% and 1%
+			respectively.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet formationSkipInfo()}
+	<FilterInfo title="Skip odds">
+		<p>
+			<strong>The "missing pieces" dial.</strong> Once the grid is laid out, every chunk
+			except the first is deleted with this probability. 0 keeps the full grid; 0.5 drops
+			about half of them, leaving large empty gaps.
+		</p>
+		<p>
+			This is the seed's <em>dice weighting</em>, not the outcome — a piece with 0.5 skip
+			odds might still keep most of its chunks by luck. If you care about the result rather
+			than the setting, filter <strong>Actual chunks</strong> instead.
+		</p>
+		<p>
+			About half of all Formation pieces have no skipping at all (0), with 0.1 next most
+			common and 0.5 the rarest at roughly 5%.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet formationChunksInfo()}
+	<FilterInfo title="Actual chunks">
+		<p>
+			<strong>How many chunks actually got placed</strong> — the Horizontal × Vertical grid
+			minus whatever Skip odds deleted. A piece always keeps at least one, and the most
+			possible is 49 (a full 7×7 grid).
+		</p>
+		<p>
+			This is the ground-truth count, so it's usually the better filter when you care how
+			much structure survived. Setting a minimum of 2 guarantees at least one visible seam.
+		</p>
+		<p>
+			It interacts with the section limits: capping Horizontal and Vertical also caps how
+			many chunks can exist. If you ask for more than the grid can hold, the app will warn
+			you rather than search for something impossible.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet orbitalInfo()}
+	<FilterInfo title="Orbital structure">
+		<p>
+			<strong>Orbital pieces are built as concentric bands around a centre point.</strong>
+			Bands stack outward, all the same thickness, until the piece covers the canvas — so
+			the band count falls out of the geometry rather than being chosen directly.
+		</p>
+		<p>
+			The centre can sit off the canvas entirely, in which case you see huge arcs sweeping
+			in from one side instead of a bullseye.
+		</p>
+		<p>
+			Everything here describes the piece <em>before</em> the flow field and turbulence
+			reshape it. On a high-turbulence seed the rings can be stretched into streaks and be
+			hard to count by eye.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet ringBandsInfo()}
+	<FilterInfo title="Ring bands">
+		<p>
+			<strong>How many concentric bands the piece is made of.</strong> Each band is a ring
+			of the thickness set by Band thickness, and they keep stacking outward until the piece
+			covers the canvas.
+		</p>
+		<p>
+			Because of that, the count is a <em>consequence</em> of two other things: thick bands
+			and a centred origin give as few as 3–6, while thin bands and a far off-canvas centre
+			can produce 60 or more.
+		</p>
+		<p>
+			A high band count therefore tends to mean fine, closely-spaced rings — often with the
+			centre off the canvas.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet allowedSplitsInfo()}
+	<FilterInfo title="Allowed splits">
+		<p>
+			Every band independently breaks into <strong>1</strong> (a continuous ring),
+			<strong>2</strong> (halves) or <strong>3</strong> (thirds) wedge arcs.
+		</p>
+		<p>
+			<strong>This is a whitelist:</strong> a seed only matches if <em>every</em> band uses
+			one of the values you check. Check only 1 to demand all-continuous rings; check 1 and
+			2 to allow halves but ban thirds. Leaving everything unchecked means no constraint.
+		</p>
+		<p>
+			Checking a value doesn't force it to appear — it only permits it. To require one, use
+			<strong>Required splits</strong>.
+		</p>
+		<div class="tip">
+			<strong>Splits are often invisible.</strong> A wedge boundary only shows up if the
+			colour happens to change there, which is a dice roll weighted by Color variety — at
+			Low it fires roughly one time in nine. So a piece can be full of splits you simply
+			can't see. Pair these filters with High color variety if you want them visible.
+		</div>
+	</FilterInfo>
+{/snippet}
+
+{#snippet requiredSplitsInfo()}
+	<FilterInfo title="Required splits">
+		<p>
+			<strong>The opposite of Allowed splits.</strong> Each value you check must appear in
+			at least one band. It says nothing about the other bands — they can be anything.
+		</p>
+		<p>
+			Requiring 3 means "somewhere in this piece, a band is split into thirds". Requiring 2
+			and 3 means both must appear <em>somewhere</em> — it is an "and", not an "or", so
+			there's no way to ask for "either a 2 or a 3".
+		</p>
+		<p>
+			The two filters combine: Allowed 1 + 2 with Required 2 means no band may be a 3, and
+			at least one must be a 2.
+		</p>
+		<div class="tip">
+			<strong>A weaker lever than it looks.</strong> This guarantees a split band
+			<em>exists</em>, not that you'll be able to see it — see the note under Allowed
+			splits about colour changes.
+		</div>
+	</FilterInfo>
+{/snippet}
+
+{#snippet orbitalCenterInfo()}
+	<FilterInfo title="Center X & Center Y">
+		<p>
+			<strong>Where the rings radiate from.</strong> Each axis is picked from a handful of
+			fixed positions:
+		</p>
+		<ul>
+			<li><strong>½</strong> — dead centre on that axis</li>
+			<li><strong>⅓</strong> — a third of the way in, from either side</li>
+			<li><strong>out</strong> — just past the canvas edge</li>
+			<li><strong>far</strong> — well outside, about 1.6× the canvas away</li>
+		</ul>
+		<p>
+			Both axes centred gives a symmetric bullseye. Push one axis off-canvas and you get
+			giant arcs sweeping in from that side with no visible centre at all — a completely
+			different look, and the main reason two Orbital pieces can seem unrelated.
+		</p>
+		<p>
+			The centre position also drives how many Ring bands fit: the further off-canvas it
+			sits, the more bands are needed to cover the piece.
+		</p>
+		<p>
+			Checking several boxes matches any of them; dead centre is the single most common
+			value on each axis, and the far-outside positions are the rarest.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet orbitalSpacingInfo()}
+	<FilterInfo title="Point spacing (Orbital)">
+		<p>
+			<strong>The gap between dots travelling around each ring</strong>, as a percentage of
+			canvas width. The spacing between rings within a band is derived from it automatically
+			— half this value.
+		</p>
+		<p>
+			1–2% reads as smooth, continuous beaded rings. 8–16% gives loose dotted orbits with
+			visible gaps between the points.
+		</p>
+		<p>
+			The tight values are much more common than the loose ones — 1% alone is about a third
+			of seeds, while 16% is only around 6%.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet bandThicknessInfo()}
+	<FilterInfo title="Band thickness">
+		<p>
+			<strong>How thick each concentric band is</strong>, as a percentage of canvas width.
+			Only three values occur — <strong>7%</strong>, <strong>15%</strong> and
+			<strong>30%</strong> — and they're equally likely.
+		</p>
+		<p>
+			This is the main driver of the piece's character: 7% gives many fine rings, 30% gives
+			a few bold, chunky ones. Together with the centre position it also determines how many
+			<strong>Ring bands</strong> the piece ends up with.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet splitOffsetInfo()}
+	<FilterInfo title="Split offset">
+		<p>
+			<strong>Where around the circle the wedge seams start.</strong> A single random
+			rotation from 0–360°, shared by every band in the piece.
+		</p>
+		<p>
+			It rotates all the split boundaries together and changes nothing else — no effect on
+			band count, spacing or colour. Worth filtering only if you're hunting a specific seam
+			placement, such as a boundary running through the top of the piece.
+		</p>
+		<p>
+			On a piece whose bands are all continuous (1 split), it has no visible effect at all.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsInfo()}
+	<FilterInfo title="Shadows structure">
+		<p>
+			<strong>Shadows pieces are made of scattered, non-overlapping circles.</strong> Each
+			circle is dropped at a random spot with a random size, and then filled — either with
+			concentric rings or with a square grid of dots.
+		</p>
+		<p>
+			Circles are placed one at a time and any that would overlap an existing circle is
+			thrown away, so the piece reads as separate islands of texture on open ground.
+		</p>
+		<p>
+			These filters only match Shadows pieces, so they grey out when you pin a different
+			Structure.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsTargetInfo()}
+	<FilterInfo title="Target circles">
+		<p>
+			<strong>How many circles the algorithm sets out to place</strong> — one of 5, 7, 10,
+			20, 30 or 60, all equally likely.
+		</p>
+		<p>
+			This is an <em>intention</em>, not a result. Circles are sized anywhere from 5% to 50%
+			of the canvas, so on the crowded targets most attempts collide with a circle that's
+			already there and get discarded. A target of 60 rarely yields anything close to 60.
+		</p>
+		<p>
+			If you care about what you can actually count in the image, filter
+			<strong>Actual circles</strong> instead.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsActualInfo()}
+	<FilterInfo title="Actual circles">
+		<p>
+			<strong>How many circles actually landed</strong> after collisions were rejected —
+			the ground-truth count, and the number you can count in the finished piece.
+		</p>
+		<p>
+			Placement gives up after a thousand failed attempts, so this can fall well short of
+			the target. Small targets nearly always fit completely; large ones almost never do.
+		</p>
+		<p>
+			A low count means a few big circles with lots of open space; a high count means many
+			small ones packed together.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsFillInfo()}
+	<FilterInfo title="Fill style">
+		<p>
+			<strong>What each circle is filled with</strong> — either concentric rings
+			(<em>radial</em>) or a square grid of dots (<em>square</em>). The piece follows one of
+			three rules, all equally likely:
+		</p>
+		<ul>
+			<li><strong>All radial</strong> — every circle is concentric rings</li>
+			<li><strong>Mixed</strong> — each circle flips its own 50/50 coin</li>
+			<li><strong>All square</strong> — every circle is a grid</li>
+		</ul>
+		<p>
+			Mixed is the only setting where both textures appear in the same piece, so it's the
+			one to choose if you want that contrast. The two "all" settings give a more uniform,
+			consistent look.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsSquareDirInfo()}
+	<FilterInfo title="Square direction">
+		<p>
+			For circles filled with a square grid, whether the dots are laid down
+			<strong>column by column</strong> or <strong>row by row</strong>.
+		</p>
+		<p>
+			The dots end up in exactly the same places either way — only the <em>order</em> they
+			are drawn in changes. Since colour drifts gradually as dots are placed, that order
+			nudges whether the colour gradient runs across the grid or down it.
+		</p>
+		<p>
+			Genuinely subtle, and it does nothing at all on a piece with no square-filled circles.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet shadowsRadialDirInfo()}
+	<FilterInfo title="Radial direction">
+		<p>
+			For circles filled with concentric rings, whether they're drawn
+			<strong>outside-in</strong> or <strong>inside-out</strong>.
+		</p>
+		<p>
+			As with Square direction, the dots land in the same places — the order decides which
+			rings overlap which, and which way the colour drifts across the circle.
+		</p>
+		<p>
+			Subtle, and worth knowing that a small fraction of radial circles have their drawing
+			order shuffled at random regardless of this setting, which scrambles the layering
+			anyway.
+		</p>
+	</FilterInfo>
+{/snippet}
 
 <style>
 	:global(:root) {
@@ -2163,6 +2590,17 @@
 		background: rgba(220, 80, 80, 0.1);
 		border-radius: 4px;
 		white-space: pre-line;
+	}
+	/* Shown when the chosen Flow field pins the angle, so the range slider
+	   can't actually narrow anything. */
+	.angle-note {
+		color: #8fa3b8;
+		font-size: 11px;
+		margin-top: 6px;
+		padding: 5px 7px;
+		background: rgba(143, 163, 184, 0.1);
+		border-radius: 4px;
+		line-height: 1.4;
 	}
 	.combo-warn {
 		color: #c08a5a;
