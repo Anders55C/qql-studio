@@ -37,12 +37,17 @@
 		}
 	}
 
+	// Inflate = qqlrs' inflate_draw_radius. Paint-time only, so it re-renders the
+	// same layout with every point forced to a small minimum radius, revealing
+	// dots that would otherwise be invisible.
+	let inflate = $state(false);
+
 	async function load() {
 		loading = true;
 		error = null;
 		pngUrl = null;
 		try {
-			const r = await renderSeed(candidate.seed, width);
+			const r = await renderSeed(candidate.seed, width, inflate);
 			pngUrl = r.pngDataUrl;
 		} catch (e) {
 			error = String(e);
@@ -59,7 +64,7 @@
 	// chosen width, and write it there. Independent of the favorites folder.
 	async function saveAs() {
 		if (exporting) return;
-		const name = `${candidate.seed}.png`;
+		const name = `${candidate.seed}${inflate ? '-inflated' : ''}.png`;
 		const dest = await saveDialog({
 			defaultPath: name,
 			filters: [{ name: 'PNG image', extensions: ['png'] }]
@@ -68,7 +73,7 @@
 		exporting = true;
 		error = null;
 		try {
-			await exportSeedPng(candidate.seed, width, dest);
+			await exportSeedPng(candidate.seed, width, dest, inflate);
 		} catch (e) {
 			error = `Export failed: ${e}`;
 		} finally {
@@ -294,6 +299,10 @@
 					<option value={4800}>4800</option>
 					<option value={9600}>9600</option>
 				</select>
+			</label>
+			<label class="inflate-toggle" title="Give every point a small minimum radius so near-invisible dots get painted">
+				<input type="checkbox" bind:checked={inflate} disabled={loading} />
+				Inflate
 			</label>
 			<button onclick={load} disabled={loading}>re-render</button>
 			<button onclick={saveAs} disabled={exporting}>
@@ -584,6 +593,19 @@
 </div>
 
 <style>
+	.inflate-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: 12px;
+		color: #bbb;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.inflate-toggle input {
+		margin: 0;
+		cursor: pointer;
+	}
 	.backdrop {
 		position: fixed;
 		inset: 0;

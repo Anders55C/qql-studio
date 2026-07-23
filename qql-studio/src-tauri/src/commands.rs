@@ -1013,11 +1013,15 @@ where
 }
 
 #[tauri::command]
-pub async fn render_seed(seed_hex: String, width: i32) -> Result<RenderResult, String> {
+pub async fn render_seed(
+    seed_hex: String,
+    width: i32,
+    inflate: Option<bool>,
+) -> Result<RenderResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
-        render::render(&bytes, w).map_err(|e| e.to_string())
+        render::render(&bytes, w, inflate.unwrap_or(false)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
@@ -1035,7 +1039,7 @@ pub async fn save_seed_png(
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
-        let png = render::render_png_bytes(&bytes, w).map_err(|e| e.to_string())?;
+        let png = render::render_png_bytes(&bytes, w, false).map_err(|e| e.to_string())?;
         let name = format!("0x{}.png", seed_hex.trim_start_matches("0x"));
         let path = std::path::Path::new(&folder).join(name);
         std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
@@ -1065,11 +1069,13 @@ pub async fn export_seed_png(
     seed_hex: String,
     width: i32,
     path: String,
+    inflate: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
-        let png = render::render_png_bytes(&bytes, w).map_err(|e| e.to_string())?;
+        let png = render::render_png_bytes(&bytes, w, inflate.unwrap_or(false))
+            .map_err(|e| e.to_string())?;
         std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
         Ok(path)
     })
@@ -1318,6 +1324,7 @@ mod tests {
                 "33c9371d25ce44a408f8a6473fbad86bf81e1a17a2e52c90cf66ffff1296712e"
             ),
             240,
+            false,
         )
         .unwrap();
         assert!(result.png_data_url.starts_with("data:image/png;base64,"));

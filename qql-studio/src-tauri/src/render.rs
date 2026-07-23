@@ -248,7 +248,7 @@ fn summary_to_stats(summary: &art::LayoutSummary) -> LayoutStats {
 }
 
 /// Render a seed and return both PNG bytes (as base64 data URL) and stats.
-pub fn render(seed: &[u8; 32], width: i32) -> Result<RenderResult> {
+pub fn render(seed: &[u8; 32], width: i32, inflate: bool) -> Result<RenderResult> {
     // For small (thumbnail-sized) renders we expect many to happen in parallel
     // from the grid, so we let each render use a single thread and lean on
     // multi-tile parallelism. For large renders (detail view, full-resolution
@@ -257,6 +257,7 @@ pub fn render(seed: &[u8; 32], width: i32) -> Result<RenderResult> {
     let chunks = if width >= 1500 { "2x2" } else { "1x1" };
     let cfg = Config {
         chunks: chunks.parse().unwrap(),
+        inflate_draw_radius: inflate,
         ..Config::default()
     };
     let render_data = art::draw(seed, color_db(), &cfg, width, |_frame| {});
@@ -311,10 +312,14 @@ pub struct RenderResult {
 
 /// Render a seed to raw PNG bytes at the given width. Used by the save-to-disk
 /// path, which wants the bytes directly (no base64, no stats).
-pub fn render_png_bytes(seed: &[u8; 32], width: i32) -> Result<Vec<u8>> {
+/// `inflate` maps to qqlrs' `inflate_draw_radius`: give every point a small
+/// minimum radius so dots that would paint as (near-)nothing become visible.
+/// Purely a paint-time change — layout and colours are untouched.
+pub fn render_png_bytes(seed: &[u8; 32], width: i32, inflate: bool) -> Result<Vec<u8>> {
     let chunks = if width >= 1500 { "2x2" } else { "1x1" };
     let cfg = Config {
         chunks: chunks.parse().unwrap(),
+        inflate_draw_radius: inflate,
         ..Config::default()
     };
     let render_data = art::draw(seed, color_db(), &cfg, width, |_frame| {});

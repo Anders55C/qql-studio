@@ -209,14 +209,16 @@ export const decodeSeed = (seedHex: string) =>
 export const generateCandidates = (request: GenerateRequest) =>
 	invoke<GenerateOutcome>('generate_candidates', { request });
 export const cancelSearch = () => invoke<void>('cancel_search');
-export const renderSeed = (seedHex: string, width: number) =>
-	invoke<RenderResult>('render_seed', { seedHex, width });
+// `inflate` maps to qqlrs' inflate_draw_radius: give every point a small minimum
+// radius so near-invisible dots get painted. Paint-time only — layout unchanged.
+export const renderSeed = (seedHex: string, width: number, inflate = false) =>
+	invoke<RenderResult>('render_seed', { seedHex, width, inflate });
 export const saveSeedPng = (seed: string, width: number, folder: string) =>
 	invoke<string>('save_seed_png', { seedHex: seed, width, folder });
 export const deleteSeedPng = (folder: string, seed: string) =>
 	invoke<void>('delete_seed_png', { folder, seedHex: seed });
-export const exportSeedPng = (seed: string, width: number, path: string) =>
-	invoke<string>('export_seed_png', { seedHex: seed, width, path });
+export const exportSeedPng = (seed: string, width: number, path: string, inflate = false) =>
+	invoke<string>('export_seed_png', { seedHex: seed, width, path, inflate });
 
 export type AnimationProgress = { done: number; total: number; phase: string };
 // `numPoints`, when already known from layout stats, saves the backend a full
