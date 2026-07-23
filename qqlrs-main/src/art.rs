@@ -741,7 +741,19 @@ impl GroupedFlowLines {
         start_point_groups: StartPointGroups,
         rng: &mut Rng,
     ) -> (Self, usize) {
-        let curve_length = *rng.choice(&[500, 650, 850]);
+        let mut curve_length = *rng.choice(&[500, 650, 850]);
+        // Debug-only override (set QQL_FORCE_CURVE_LEN=<n>). The rng draw above
+        // still happens, so structure/palette/flow field are unchanged — but the
+        // piece is NOT otherwise identical: each point surviving the collision
+        // test consumes rng (colour jitter), so a different curve length shifts
+        // the stream and downstream colours/scales diverge. Useful for rough
+        // comparison only. No effect unless set; golden tests unaffected.
+        if let Ok(n) = std::env::var("QQL_FORCE_CURVE_LEN")
+            .ok()
+            .map_or(Err(()), |v| v.parse::<usize>().map_err(|_| ()))
+        {
+            curve_length = n;
+        }
         let groups = start_point_groups
             .0
             .into_iter()
