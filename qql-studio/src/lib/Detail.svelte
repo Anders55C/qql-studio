@@ -6,7 +6,8 @@
 		exportSeedPng,
 		renderSeed,
 		type AnimationProgress,
-		type Candidate
+		type Candidate,
+		type LayoutStats
 	} from './api';
 	import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -41,6 +42,10 @@
 	// same layout with every point forced to a small minimum radius, revealing
 	// dots that would otherwise be invisible.
 	let inflate = $state(false);
+	// Searches that only use structure filters skip the layout, so the
+	// candidate may arrive without stats; the render below supplies them.
+	let renderedStats = $state<LayoutStats | null>(null);
+	const stats = $derived(candidate.stats ?? renderedStats);
 
 	async function load() {
 		loading = true;
@@ -49,6 +54,7 @@
 		try {
 			const r = await renderSeed(candidate.seed, width, inflate);
 			pngUrl = r.pngDataUrl;
+			renderedStats = r.stats;
 		} catch (e) {
 			error = String(e);
 		} finally {
@@ -134,7 +140,7 @@
 				candidate.seed,
 				animSize,
 				animFrameCount,
-				candidate.stats?.numPoints
+				stats?.numPoints
 			);
 			frameIdx = 0;
 			startPlayer();
@@ -165,7 +171,7 @@
 				delayMs(),
 				animHoldMs,
 				dest,
-				candidate.stats?.numPoints
+				stats?.numPoints
 			);
 		} catch (e) {
 			if (!isCancelled(e)) animError = `Export failed: ${e}`;
@@ -195,7 +201,7 @@
 				delayMs(),
 				animHoldMs,
 				dest,
-				candidate.stats?.numPoints
+				stats?.numPoints
 			);
 		} catch (e) {
 			if (!isCancelled(e)) animError = `Export failed: ${e}`;
@@ -407,183 +413,199 @@
 				{/each}
 			</tbody>
 		</table>
-		{#if candidate.stats}
-			<h3>Layout stats</h3>
-			<div class="stats-line">
-				<strong>{candidate.stats.numPoints.toLocaleString()}</strong> points,
-				<strong>{candidate.stats.colorsUsed.length}</strong> colors
+		{#if stats}
+			{@const st = stats}
+			{@const so = st.splatterOdds}
+			{@const splatterMatches = [
+				so <= 0 && 'None',
+				so > 0 && 'Has splatter',
+				so > 0 && so <= 0.005 && 'Light only',
+				so >= 0.01 && 'Moderate+',
+				so >= 0.08 && 'Heavy+'
+			].filter(Boolean)}
+			{@const fl = st.flow}
+			<h3>Layout stats <small class="muted">· named to match the filters</small></h3>
+
+			<div class="stat-sec">
+				<h4>Characteristics</h4>
+				<div class="row"><span>Points</span><b>{st.numPoints.toLocaleString()}</b></div>
+				<div class="row"><span>Colors</span><b>{st.colorsUsed.length}</b></div>
 			</div>
-			<div class="bg-line">
-				Background: <strong>{candidate.stats.backgroundColor}</strong>
+
+			<div class="stat-sec">
+				<h4>Radius buckets</h4>
+				<div class="bucket-table">
+					<div class="bucket-cell">
+						<div class="bucket-name small">Small</div>
+						<div class="bucket-value">{st.radiusBuckets.small.toLocaleString()}</div>
+						<div class="bucket-range">≤ 1.2%</div>
+					</div>
+					<div class="bucket-cell">
+						<div class="bucket-name medium">Medium</div>
+						<div class="bucket-value">{st.radiusBuckets.medium.toLocaleString()}</div>
+						<div class="bucket-range">1.2 – 3%</div>
+					</div>
+					<div class="bucket-cell">
+						<div class="bucket-name large">Large</div>
+						<div class="bucket-value">{st.radiusBuckets.large.toLocaleString()}</div>
+						<div class="bucket-range">&gt; 3%</div>
+					</div>
+				</div>
 			</div>
-			{#if candidate.stats.formationDims}
-				<div class="bg-line">
-					Sections:
-					<strong>
-						{candidate.stats.formationDims.horizontal} ×
-						{candidate.stats.formationDims.vertical}
-					</strong>
-					({candidate.stats.formationDims.total} total)
+
+			<div class="stat-sec">
+				<h4>Colors</h4>
+				<div class="row"><span>Background</span><b>{st.backgroundColor}</b></div>
+				<div class="row top">
+					<span>Ring colors</span>
+					<div class="color-chips">
+						{#each st.colorsUsed as c}<span class="chip">{c}</span>{/each}
+					</div>
 				</div>
-			{/if}
-			{#if candidate.stats.shadowsInfo}
-				{@const si = candidate.stats.shadowsInfo}
-				{@const fillStyle =
-					si.pSquare <= 0.1
-						? 'all radial'
-						: si.pSquare >= 0.9
-							? 'all square'
-							: 'mixed'}
-				<div class="bg-line">
-					Circles:
-					<strong>{si.actualCircles} / {si.numCirclesTarget}</strong>
-					· fill <strong>{fillStyle}</strong>
+				<div class="row">
+					<span>Splatter</span>
+					<b>{splatterMatches.join(' · ')}</b>
 				</div>
-				<div class="bg-line">
-					Square: <strong>{si.columnarSquare ? 'col-major' : 'row-major'}</strong>
-					· radial:
-					<strong>
-						{si.outwardRadial ? 'outside → in' : 'inside → out'}
-					</strong>
-				</div>
-			{/if}
-			{#if candidate.stats.orbitalInfo}
-				{@const oi = candidate.stats.orbitalInfo}
-				{@const fmt = (f: number) => {
-					const pct = Math.round(f * 1000) / 1000;
-					const map: Record<string, string> = {
-						'0.333': '⅓',
-						'0.5': '½',
-						'0.667': '⅔',
-						'-0.333': '-⅓',
-						'1.333': '4/3',
-						'-1.6': '-1.6',
-						'1.6': '1.6'
-					};
-					return map[pct.toFixed(3)] ?? pct.toString();
-				}}
-				<div class="bg-line">
-					Ring bands:
-					<strong>{oi.ringBands}</strong>
-					· splits used
-					<strong>{oi.splitsUsed.join(', ') || 'none'}</strong>
-				</div>
-				<div class="bg-line">
-					Center:
-					<strong>({fmt(oi.centerXFrac)}, {fmt(oi.centerYFrac)})</strong>
-					<span class="muted">
-						· {oi.centerOnCanvas ? 'on canvas' : 'off canvas'}
-					</span>
-				</div>
-				<div class="bg-line">
-					Spacing
-					<strong>{(oi.baseStepFrac * 100).toFixed(0)}%</strong>
-					· band thickness
-					<strong>{(oi.radialGroupStepFrac * 100).toFixed(0)}%</strong>
-					· rotation
-					<strong>{oi.splitOffsetDeg.toFixed(0)}°</strong>
-				</div>
-			{/if}
-			<div class="bg-line">
-				Curve length: <strong>{candidate.stats.curveLength}</strong>
+				<div class="row"><span>Odds range</span><b>{so.toFixed(3)}</b></div>
 			</div>
-			<div class="bg-line">
-				Splatter:
-				<strong>
-					{#if candidate.stats.splatterOdds <= 0}
-						none
-					{:else if candidate.stats.splatterOdds <= 0.005}
-						light
-					{:else if candidate.stats.splatterOdds < 0.08}
-						moderate
-					{:else if candidate.stats.splatterOdds < 0.5}
-						heavy
+
+			<div class="stat-sec">
+				<h4>Composition</h4>
+				<div class="row">
+					<span>Flow angle</span>
+					{#if fl?.linear && fl.angleDeg != null}
+						<b>{fl.angleDeg.toFixed(1)}°</b>
 					{:else}
-						extreme
+						<b class="na">n/a — radial flow</b>
 					{/if}
-				</strong>
-				<span class="muted">
-					· odds {candidate.stats.splatterOdds.toFixed(3)}
-				</span>
+				</div>
+				{#if fl && !fl.linear}
+					<div class="row sub">
+						<span>Flow</span>
+						<span>
+							{fl.inward ? 'inward' : 'outward'}, {fl.ccw ? 'counter-clockwise' : 'clockwise'}
+							· circularity {fl.circularity?.toFixed(2)}
+						</span>
+					</div>
+					{#if fl.centerXFrac != null && fl.centerYFrac != null}
+						{@const onCanvas =
+							fl.centerXFrac >= 0 && fl.centerXFrac <= 1 && fl.centerYFrac >= 0 && fl.centerYFrac <= 1}
+						<div class="row sub">
+							<span>Flow center</span>
+							<span>
+								({fl.centerXFrac.toFixed(2)}, {fl.centerYFrac.toFixed(2)})
+								· {onCanvas ? 'on canvas' : 'off canvas'} · not a filter yet
+							</span>
+						</div>
+					{/if}
+				{/if}
+				{#if st.quadrants}
+					{@const q = st.quadrants}
+					{@const corners = [
+						['Top-left', q.topLeft],
+						['Top-right', q.topRight],
+						['Bottom-left', q.bottomLeft],
+						['Bottom-right', q.bottomRight]
+					] as [string, number][]}
+					{@const densest = corners.reduce((a, b) => (b[1] >= a[1] ? b : a))}
+					{@const sparsest = corners.reduce((a, b) => (b[1] < a[1] ? b : a))}
+					{@const qTotal = q.topLeft + q.topRight + q.bottomLeft + q.bottomRight}
+					{@const pct = (v: number) => (qTotal > 0 ? ((100 * v) / qTotal).toFixed(1) : '0.0')}
+					<div class="row">
+						<span>Corner concentration</span>
+						<b>{densest[0]} densest</b>
+					</div>
+					<div class="row">
+						<span>Min ratio</span>
+						<b>{sparsest[1] > 0 ? (densest[1] / sparsest[1]).toFixed(2) + '×' : '∞'}</b>
+					</div>
+					<div class="quad-display">
+						<div class="quad-display-row">
+							<div class="quad-display-cell">
+								<div class="quad-display-label">TL</div>
+								<div class="quad-display-value">{q.topLeft.toLocaleString()}</div>
+								<div class="quad-display-pct">{pct(q.topLeft)}%</div>
+							</div>
+							<div class="quad-display-cell">
+								<div class="quad-display-label">TR</div>
+								<div class="quad-display-value">{q.topRight.toLocaleString()}</div>
+								<div class="quad-display-pct">{pct(q.topRight)}%</div>
+							</div>
+						</div>
+						<div class="quad-display-row">
+							<div class="quad-display-cell">
+								<div class="quad-display-label">BL</div>
+								<div class="quad-display-value">{q.bottomLeft.toLocaleString()}</div>
+								<div class="quad-display-pct">{pct(q.bottomLeft)}%</div>
+							</div>
+							<div class="quad-display-cell">
+								<div class="quad-display-label">BR</div>
+								<div class="quad-display-value">{q.bottomRight.toLocaleString()}</div>
+								<div class="quad-display-pct">{pct(q.bottomRight)}%</div>
+							</div>
+						</div>
+					</div>
+				{/if}
+				<div class="row"><span>Curve length</span><b>{st.curveLength}</b></div>
 			</div>
-			<div class="bucket-table">
-				<div class="bucket-cell">
-					<div class="bucket-name small">Small</div>
-					<div class="bucket-value">
-						{candidate.stats.radiusBuckets.small.toLocaleString()}
-					</div>
-					<div class="bucket-range">≤ 1.2%</div>
-				</div>
-				<div class="bucket-cell">
-					<div class="bucket-name medium">Medium</div>
-					<div class="bucket-value">
-						{candidate.stats.radiusBuckets.medium.toLocaleString()}
-					</div>
-					<div class="bucket-range">1.2 – 3%</div>
-				</div>
-				<div class="bucket-cell">
-					<div class="bucket-name large">Large</div>
-					<div class="bucket-value">
-						{candidate.stats.radiusBuckets.large.toLocaleString()}
-					</div>
-					<div class="bucket-range">&gt; 3%</div>
-				</div>
-			</div>
-			{#if candidate.stats.quadrants}
-				{@const q = candidate.stats.quadrants}
-				{@const qTotal =
-					q.topLeft + q.topRight + q.bottomLeft + q.bottomRight}
-				{@const pct = (v: number) =>
-					qTotal > 0 ? ((100 * v) / qTotal).toFixed(1) : '0.0'}
-				<div class="quad-display">
-					<div class="quad-display-row">
-						<div class="quad-display-cell">
-							<div class="quad-display-label">TL</div>
-							<div class="quad-display-value">
-								{q.topLeft.toLocaleString()}
-							</div>
-							<div class="quad-display-pct">{pct(q.topLeft)}%</div>
-						</div>
-						<div class="quad-display-cell">
-							<div class="quad-display-label">TR</div>
-							<div class="quad-display-value">
-								{q.topRight.toLocaleString()}
-							</div>
-							<div class="quad-display-pct">{pct(q.topRight)}%</div>
-						</div>
-					</div>
-					<div class="quad-display-row">
-						<div class="quad-display-cell">
-							<div class="quad-display-label">BL</div>
-							<div class="quad-display-value">
-								{q.bottomLeft.toLocaleString()}
-							</div>
-							<div class="quad-display-pct">{pct(q.bottomLeft)}%</div>
-						</div>
-						<div class="quad-display-cell">
-							<div class="quad-display-label">BR</div>
-							<div class="quad-display-value">
-								{q.bottomRight.toLocaleString()}
-							</div>
-							<div class="quad-display-pct">{pct(q.bottomRight)}%</div>
-						</div>
-					</div>
+
+			{#if st.formationDims}
+				{@const fd = st.formationDims}
+				<div class="stat-sec">
+					<h4>Formation structure</h4>
+					<div class="row"><span>Horizontal <small>columns</small></span><b>{fd.horizontal}</b></div>
+					<div class="row"><span>Vertical <small>rows</small></span><b>{fd.vertical}</b></div>
+					<div class="row"><span>Point spacing <small>% canvas</small></span><b>{+(fd.stepFrac * 100).toFixed(2)}</b></div>
+					<div class="row"><span>Skip odds</span><b>{fd.skipOdds === 0 ? '0' : String(fd.skipOdds).replace(/^0/, '')}</b></div>
+					<div class="row"><span>Actual chunks</span><b>{fd.actualChunks}</b></div>
 				</div>
 			{/if}
-			<div class="color-chips">
-				{#each candidate.stats.colorsUsed as c}
-					<span class="chip">{c}</span>
-				{/each}
-			</div>
+
+			{#if st.orbitalInfo}
+				{@const oi = st.orbitalInfo}
+				{@const cat = (c: number) => ['½', '⅓', 'out', 'far'][c] ?? '?'}
+				<div class="stat-sec">
+					<h4>Orbital structure</h4>
+					<div class="row"><span>Ring bands</span><b>{oi.ringBands}</b></div>
+					<div class="row">
+						<span>Splits used <small>Allowed / Required</small></span>
+						<b>{oi.splitsUsed.join(', ') || 'none'}</b>
+					</div>
+					<div class="row">
+						<span>Center X</span>
+						<b>{cat(oi.centerXCategory)} <small class="muted">{oi.centerXFrac.toFixed(3)}</small></b>
+					</div>
+					<div class="row">
+						<span>Center Y</span>
+						<b>{cat(oi.centerYCategory)} <small class="muted">{oi.centerYFrac.toFixed(3)}</small></b>
+					</div>
+					<div class="row"><span>Point spacing <small>% canvas</small></span><b>{Math.round(oi.baseStepFrac * 100)}</b></div>
+					<div class="row"><span>Band thickness <small>% canvas</small></span><b>{Math.round(oi.radialGroupStepFrac * 100)}</b></div>
+					<div class="row"><span>Split offset</span><b>{oi.splitOffsetDeg.toFixed(0)}°</b></div>
+				</div>
+			{/if}
+
+			{#if st.shadowsInfo}
+				{@const si = st.shadowsInfo}
+				<div class="stat-sec">
+					<h4>Shadows structure</h4>
+					<div class="row"><span>Target circles</span><b>{si.numCirclesTarget}</b></div>
+					<div class="row">
+						<span>Fill style</span>
+						<b>{si.pSquare <= 0.1 ? 'All radial' : si.pSquare >= 0.9 ? 'All square' : 'Mixed'}</b>
+					</div>
+					<div class="row"><span>Actual circles</span><b>{si.actualCircles}</b></div>
+					<div class="row"><span>Square direction</span><b>{si.columnarSquare ? 'Column-major' : 'Row-major'}</b></div>
+					<div class="row"><span>Radial direction</span><b>{si.outwardRadial ? 'Outside → in' : 'Inside → out'}</b></div>
+				</div>
+			{/if}
+
 			<details>
 				<summary>Ring counts</summary>
 				<table class="ringcounts">
 					<tbody>
-						{#each candidate.stats.ringCounts as r}
-							<tr>
-								<th>{r.rings}-ring</th>
-								<td>{r.count}</td>
-							</tr>
+						{#each st.ringCounts as r}
+							<tr><th>{r.rings}-ring</th><td>{r.count}</td></tr>
 						{/each}
 					</tbody>
 				</table>
@@ -593,6 +615,18 @@
 </div>
 
 <style>
+	.muted { color: #777; font-weight: 400; }
+	.stat-sec { margin: 14px 0 4px; padding-top: 10px; border-top: 1px solid #222; }
+	.stat-sec h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #888; font-weight: 600; }
+	.stat-sec .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 12.5px; padding: 2px 0; }
+	.stat-sec .row.top { align-items: flex-start; }
+	.stat-sec .row > span:first-child { color: #9a9a9a; flex-shrink: 0; }
+	.stat-sec .row small { color: #666; font-size: 10.5px; margin-left: 3px; }
+	.stat-sec .row b { font-weight: 600; color: #e6e6e6; text-align: right; }
+	.stat-sec .row b.na { color: #777; font-weight: 400; }
+	.stat-sec .row.sub { font-size: 11.5px; color: #8a8a8a; padding-left: 10px; }
+	.stat-sec .row.sub > span:last-child { text-align: right; }
+	.stat-sec .color-chips { justify-content: flex-end; }
 	.inflate-toggle {
 		display: inline-flex;
 		align-items: center;
@@ -811,24 +845,6 @@
 	table.traits td,
 	table.ringcounts td {
 		color: #ddd;
-	}
-	.stats-line {
-		color: #aaa;
-	}
-	.stats-line strong {
-		color: #fff;
-	}
-	.bg-line {
-		margin-top: 4px;
-		font-size: 12px;
-		color: #aaa;
-	}
-	.bg-line strong {
-		color: #fff;
-	}
-	.bg-line .muted {
-		color: #777;
-		margin-left: 2px;
 	}
 	.bucket-table {
 		display: grid;

@@ -34,6 +34,48 @@ pub struct LayoutStats {
     pub curve_length: usize,
     /// Per-point probability of splatter satellite spawn. 0.0 = no splatter.
     pub splatter_odds: f64,
+    /// Flow field set-up (linear angle, or radial circularity/direction/center).
+    pub flow: FlowWire,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowWire {
+    pub linear: bool,
+    /// Linear fields only: underlying line angle folded into [0, 90] degrees
+    /// (0 = horizontal, 90 = vertical) — the same value the Flow angle filter uses.
+    pub angle_deg: Option<f64>,
+    /// Radial fields only: 0 = straight in/out, 1 = perfectly circular.
+    pub circularity: Option<f64>,
+    pub inward: Option<bool>,
+    pub ccw: Option<bool>,
+    /// Radial fields only: the point the flow curls around, as a fraction of
+    /// canvas width/height. Independent of the Orbital structure's center.
+    pub center_x_frac: Option<f64>,
+    pub center_y_frac: Option<f64>,
+}
+
+impl From<art::FlowInfo> for FlowWire {
+    fn from(f: art::FlowInfo) -> Self {
+        let angle_deg = f.linear.then(|| {
+            let pi = std::f64::consts::PI;
+            // Ignore the up/down flip, then mirror past 90° (the left/right flip).
+            let mut t = f.default_theta.rem_euclid(pi);
+            if t > pi / 2.0 {
+                t = pi - t;
+            }
+            t.to_degrees()
+        });
+        Self {
+            linear: f.linear,
+            angle_deg,
+            circularity: f.circularity,
+            inward: f.inward,
+            ccw: f.ccw,
+            center_x_frac: f.center_frac.map(|c| c.0),
+            center_y_frac: f.center_frac.map(|c| c.1),
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug, Copy)]
@@ -199,14 +241,64 @@ pub fn layout_only(seed: &[u8; 32]) -> LayoutStats {
 }
 
 /// Like [`layout_only`] but returns `None` when the layout takes longer than
-/// the supplied deadline. Used by the bulk-search loop to skip dense outliers.
-pub fn layout_only_with_deadline(
+/// the supplied deadline, or as soon as it has placed more than `max_points`
+/// points. Used by the bulk-search loop to skip dense outliers and to reject
+/// over-budget seeds without finishing their layout.
+pub fn layout_only_with_limits(
     seed: &[u8; 32],
     deadline: Option<Instant>,
+    max_points: Option<usize>,
 ) -> Option<LayoutStats> {
     let cfg = Config::default();
-    let summary = art::layout_with_deadline(seed, color_db(), &cfg, deadline)?;
+    let summary = art::layout_with_limits(seed, color_db(), &cfg, deadline, max_points)?;
     Some(summary_to_stats(&summary))
+}
+
+/// The subset of [`LayoutStats`] that's fixed before any dots are placed.
+/// The structure filters only read these, so the search can check them
+/// without running a layout.
+#[derive(Clone, Debug)]
+pub struct StructureStats {
+    pub background_color: String,
+    pub formation_dims: Option<FormationDimsWire>,
+    pub orbital_info: Option<OrbitalInfoWire>,
+    pub shadows_info: Option<ShadowsInfoWire>,
+    pub curve_length: usize,
+    pub splatter_odds: f64,
+}
+
+#[cfg(test)]
+impl LayoutStats {
+    pub fn structure(&self) -> StructureStats {
+        StructureStats {
+            background_color: self.background_color.clone(),
+            formation_dims: self.formation_dims,
+            orbital_info: self.orbital_info.clone(),
+            shadows_info: self.shadows_info,
+            curve_length: self.curve_length,
+            splatter_odds: self.splatter_odds,
+        }
+    }
+}
+
+/// Structure stats without a layout — see [`art::structure_preview`].
+pub fn structure_only(seed: &[u8; 32]) -> StructureStats {
+    let p = art::structure_preview(seed, color_db());
+    StructureStats {
+        background_color: color_name(p.background_color),
+        formation_dims: p.formation_dims.map(Into::into),
+        orbital_info: p.orbital_info.map(Into::into),
+        shadows_info: p.shadows_info.map(Into::into),
+        curve_length: p.curve_length,
+        splatter_odds: p.splatter_odds,
+    }
+}
+
+fn color_name(key: qql::color::ColorKey) -> String {
+    color_db()
+        .color(key)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format!("color#{}", key))
 }
 
 fn summary_to_stats(summary: &art::LayoutSummary) -> LayoutStats {
@@ -228,10 +320,7 @@ fn summary_to_stats(summary: &art::LayoutSummary) -> LayoutStats {
             count: *count,
         })
         .collect();
-    let background_color = color_db()
-        .color(summary.background_color)
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| format!("color#{}", summary.background_color));
+    let background_color = color_name(summary.background_color);
     LayoutStats {
         num_points: summary.num_points,
         colors_used,
@@ -244,6 +333,7 @@ fn summary_to_stats(summary: &art::LayoutSummary) -> LayoutStats {
         shadows_info: summary.shadows_info.map(Into::into),
         curve_length: summary.curve_length,
         splatter_odds: summary.splatter_odds,
+        flow: summary.flow.into(),
     }
 }
 
@@ -299,6 +389,7 @@ pub fn render(seed: &[u8; 32], width: i32, inflate: bool) -> Result<RenderResult
             shadows_info: render_data.shadows_info.map(Into::into),
             curve_length: render_data.curve_length,
             splatter_odds: render_data.splatter_odds,
+            flow: render_data.flow.into(),
         },
     })
 }

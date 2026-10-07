@@ -1,6 +1,6 @@
 //! Tauri commands exposed to the frontend.
 
-use crate::render::{self, LayoutStats, RenderResult};
+use crate::render::{self, LayoutStats, RenderResult, StructureStats};
 use crate::seed::{
     build_seed, matches_filter, parse_address, parse_seed_hex, random_nonce,
     resolve_choices, seed_to_hex, trait_metadata, TraitChoices, TraitMeta, TraitsWire,
@@ -49,6 +49,14 @@ pub struct GenerateRequest {
     /// either bound is set.
     pub min_angle_deg: Option<f64>,
     pub max_angle_deg: Option<f64>,
+    /// Spiral center filter: bounds on where a radial flow field's center
+    /// sits, as fractions of canvas width / height (centers range from −⅔ to
+    /// 5⁄3, so they can be well off-canvas). Linear seeds are filtered out
+    /// when any bound is set.
+    pub min_center_x: Option<f64>,
+    pub max_center_x: Option<f64>,
+    pub min_center_y: Option<f64>,
+    pub max_center_y: Option<f64>,
     /// If `Some`, bail out of any individual layout that takes longer than
     /// this many milliseconds. Skipped layouts still count as attempts.
     pub layout_timeout_ms: Option<u32>,
@@ -65,7 +73,7 @@ pub enum GenerateMode {
     Search,
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacteristicFilter {
     pub min_points: Option<usize>,
@@ -153,12 +161,27 @@ pub struct CharacteristicFilter {
     pub splatter_mode: Option<String>,
     pub min_splatter_odds: Option<f64>,
     pub max_splatter_odds: Option<f64>,
-    /// Required background color (exact match by name).
-    pub background_color: Option<String>,
+    /// Allowed background colors (exact names). The piece's background must
+    /// be one of these. Empty / None = any background.
+    pub background_colors: Option<Vec<String>>,
     /// Restrict ring colors to this exact set (when `exact_ring_colors` is true)
     /// or require these to be present (when it's false, same as `required_colors`).
     pub ring_colors: Option<Vec<String>>,
     pub exact_ring_colors: Option<bool>,
+}
+
+fn check_range(value: usize, lo: Option<usize>, hi: Option<usize>) -> bool {
+    if let Some(lo) = lo {
+        if value < lo {
+            return false;
+        }
+    }
+    if let Some(hi) = hi {
+        if value > hi {
+            return false;
+        }
+    }
+    true
 }
 
 impl CharacteristicFilter {
@@ -260,7 +283,11 @@ impl CharacteristicFilter {
             || self.max_shadows_actual_circles.is_some()
             || self.shadows_columnar_square.is_some()
             || self.shadows_outward_radial.is_some()
-            || self.background_color.is_some()
+            || self
+                .background_colors
+                .as_ref()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
             || self
                 .ring_colors
                 .as_ref()
@@ -273,21 +300,69 @@ impl CharacteristicFilter {
                 .unwrap_or(false)
     }
 
-    fn matches(&self, stats: &LayoutStats) -> bool {
-        fn check_range(value: usize, lo: Option<usize>, hi: Option<usize>) -> bool {
-            if let Some(lo) = lo {
-                if value < lo {
-                    return false;
-                }
-            }
-            if let Some(hi) = hi {
-                if value > hi {
-                    return false;
-                }
-            }
-            true
-        }
+    /// Filters that read point-level stats, so need a full layout.
+    fn points_active(&self) -> bool {
+        let non_empty = |v: &Option<Vec<String>>| v.as_ref().map(|x| !x.is_empty()).unwrap_or(false);
+        self.min_points.is_some()
+            || self.max_points.is_some()
+            || self.min_colors.is_some()
+            || self.max_colors.is_some()
+            || self.min_small.is_some()
+            || self.max_small.is_some()
+            || self.min_medium.is_some()
+            || self.max_medium.is_some()
+            || self.min_large.is_some()
+            || self.max_large.is_some()
+            || self.min_tl.is_some()
+            || self.max_tl.is_some()
+            || self.min_tr.is_some()
+            || self.max_tr.is_some()
+            || self.min_bl.is_some()
+            || self.max_bl.is_some()
+            || self.min_br.is_some()
+            || self.max_br.is_some()
+            || self.corner_concentration.is_some()
+            || non_empty(&self.required_colors)
+            || non_empty(&self.ring_colors)
+    }
 
+    /// Filters that only read values fixed before any dots are placed
+    /// (structure, curve length, splatter, background) — checkable without a
+    /// layout via [`render::structure_only`].
+    fn structure_active(&self) -> bool {
+        // Everything `is_active` covers minus the point-level filters, done
+        // by clearing those and re-asking `is_active`, so a newly added
+        // structure field can't be silently skipped.
+        let probe = CharacteristicFilter {
+            min_points: None,
+            max_points: None,
+            min_colors: None,
+            max_colors: None,
+            required_colors: None,
+            min_small: None,
+            max_small: None,
+            min_medium: None,
+            max_medium: None,
+            min_large: None,
+            max_large: None,
+            min_tl: None,
+            max_tl: None,
+            min_tr: None,
+            max_tr: None,
+            min_bl: None,
+            max_bl: None,
+            min_br: None,
+            max_br: None,
+            corner_concentration: None,
+            corner_ratio: None,
+            ring_colors: None,
+            exact_ring_colors: None,
+            ..self.clone()
+        };
+        probe.is_active()
+    }
+
+    fn matches_points(&self, stats: &LayoutStats) -> bool {
         if !check_range(stats.num_points, self.min_points, self.max_points) {
             return false;
         }
@@ -364,6 +439,29 @@ impl CharacteristicFilter {
                 }
             }
         }
+        if let Some(ring) = &self.ring_colors {
+            if !ring.is_empty() {
+                let exact = self.exact_ring_colors.unwrap_or(false);
+                // All required colors must be present.
+                for c in ring {
+                    if !stats.colors_used.iter().any(|u| u == c) {
+                        return false;
+                    }
+                }
+                if exact {
+                    // No colors outside the allowed set may appear.
+                    for c in &stats.colors_used {
+                        if !ring.iter().any(|r| r == c) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn matches_structure(&self, stats: &StructureStats) -> bool {
         let non_empty = |v: &Option<Vec<u8>>| v.as_ref().map(|x| !x.is_empty()).unwrap_or(false);
         let non_empty_u32 =
             |v: &Option<Vec<u32>>| v.as_ref().map(|x| !x.is_empty()).unwrap_or(false);
@@ -587,28 +685,9 @@ impl CharacteristicFilter {
                 return false;
             }
         }
-        if let Some(want_bg) = &self.background_color {
-            if &stats.background_color != want_bg {
+        if let Some(allowed) = &self.background_colors {
+            if !allowed.is_empty() && !allowed.contains(&stats.background_color) {
                 return false;
-            }
-        }
-        if let Some(ring) = &self.ring_colors {
-            if !ring.is_empty() {
-                let exact = self.exact_ring_colors.unwrap_or(false);
-                // All required colors must be present.
-                for c in ring {
-                    if !stats.colors_used.iter().any(|u| u == c) {
-                        return false;
-                    }
-                }
-                if exact {
-                    // No colors outside the allowed set may appear.
-                    for c in &stats.colors_used {
-                        if !ring.iter().any(|r| r == c) {
-                            return false;
-                        }
-                    }
-                }
             }
         }
         true
@@ -629,9 +708,18 @@ pub struct ColorInfo {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BackgroundInfo {
+    pub name: String,
+    pub swatch: String,
+    /// Chance this background is picked for a piece in its palette (0–1).
+    pub odds: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaletteColors {
     pub palette: String,
-    pub backgrounds: Vec<ColorInfo>,
+    pub backgrounds: Vec<BackgroundInfo>,
     pub primaries: Vec<ColorInfo>,
 }
 
@@ -656,10 +744,18 @@ pub fn list_palette_colors() -> Vec<PaletteColors> {
         .iter()
         .map(|p| {
             let spec = db.palette(*p).expect("palette exists");
+            let total: f64 = spec.background_colors.iter().map(|(_, w)| *w as f64).sum();
             let backgrounds = spec
                 .background_colors
                 .iter()
-                .map(|(bg, _w)| color_info(db, bg.color))
+                .map(|(bg, w)| {
+                    let ColorInfo { name, swatch } = color_info(db, bg.color);
+                    BackgroundInfo {
+                        name,
+                        swatch,
+                        odds: *w as f64 / total,
+                    }
+                })
                 .collect();
             let primaries = spec
                 .color_seq
@@ -767,6 +863,43 @@ fn angle_passes(angle: Option<f64>, min: Option<f64>, max: Option<f64>) -> bool 
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CenterBounds {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
+impl CenterBounds {
+    fn from_request(r: &GenerateRequest) -> Option<Self> {
+        let any = [r.min_center_x, r.max_center_x, r.min_center_y, r.max_center_y]
+            .iter()
+            .any(Option::is_some);
+        any.then(|| Self {
+            min_x: r.min_center_x.unwrap_or(f64::NEG_INFINITY),
+            max_x: r.max_center_x.unwrap_or(f64::INFINITY),
+            min_y: r.min_center_y.unwrap_or(f64::NEG_INFINITY),
+            max_y: r.max_center_y.unwrap_or(f64::INFINITY),
+        })
+    }
+
+    /// Linear seeds have no center, so they never pass.
+    fn passes(&self, center: Option<(f64, f64)>) -> bool {
+        // Small slack so a slider stop at e.g. 33% still catches the ⅓ value.
+        const EPS: f64 = 1e-6;
+        match center {
+            Some((x, y)) => {
+                x >= self.min_x - EPS
+                    && x <= self.max_x + EPS
+                    && y >= self.min_y - EPS
+                    && y <= self.max_y + EPS
+            }
+            None => false,
+        }
+    }
+}
+
 fn default_worker_count() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -822,10 +955,18 @@ where
         .characteristic_filter
         .as_ref()
         .filter(|f| f.is_active());
-    let needs_layout = request.run_layout || char_filter.is_some();
+    // Structure filters are checked from a cheap pre-layout replay; only the
+    // point-level filters (or the "run layout" option) need a full layout.
+    let structure_filter = char_filter.filter(|f| f.structure_active());
+    let points_filter = char_filter.filter(|f| f.points_active());
+    let needs_layout = request.run_layout || points_filter.is_some();
+    // A seed is rejected once it has more than `max_points`, so the layout
+    // can stop the moment it crosses that line.
+    let point_cap = points_filter.and_then(|f| f.max_points);
     let angle_active = angle_filter_active(request.min_angle_deg, request.max_angle_deg);
     let min_angle = request.min_angle_deg;
     let max_angle = request.max_angle_deg;
+    let center_bounds = CenterBounds::from_request(&request);
     let layout_timeout = request
         .layout_timeout_ms
         .filter(|ms| *ms > 0)
@@ -946,13 +1087,27 @@ where
                                 return None;
                             }
                         }
+                        if let Some(bounds) = center_bounds {
+                            let center = qql::art::flow_center_frac(seed, render::color_db());
+                            if !bounds.passes(center) {
+                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                return None;
+                            }
+                        }
+                        if let Some(filter) = structure_filter {
+                            if !filter.matches_structure(&render::structure_only(seed)) {
+                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                return None;
+                            }
+                        }
                         let stats = if needs_layout {
                             let deadline =
                                 layout_timeout.map(|d| std::time::Instant::now() + d);
-                            match render::layout_only_with_deadline(seed, deadline) {
+                            match render::layout_only_with_limits(seed, deadline, point_cap) {
                                 Some(s) => Some(s),
                                 None => {
-                                    // Timed out — count the attempt and move on.
+                                    // Timed out or went over the max-points
+                                    // cap — count the attempt and move on.
                                     inflight_attempts.fetch_add(1, Ordering::Relaxed);
                                     return None;
                                 }
@@ -960,8 +1115,8 @@ where
                         } else {
                             None
                         };
-                        if let (Some(filter), Some(s)) = (char_filter, stats.as_ref()) {
-                            if !filter.matches(s) {
+                        if let (Some(filter), Some(s)) = (points_filter, stats.as_ref()) {
+                            if !filter.matches_points(s) {
                                 inflight_attempts.fetch_add(1, Ordering::Relaxed);
                                 return None;
                             }
@@ -1242,6 +1397,10 @@ mod tests {
             workers: Some(1),
             min_angle_deg: None,
             max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
             layout_timeout_ms: None,
         };
         let outcome = generate_candidates_inner(req, |_| {}).unwrap();
@@ -1255,6 +1414,262 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for c in &outcome.candidates {
             assert!(seen.insert(c.seed.clone()), "duplicate seed: {}", c.seed);
+        }
+    }
+
+    #[test]
+    fn spiral_center_filter_keeps_only_centers_in_range() {
+        let mut choices = TraitChoices::default();
+        choices.flow_field = Some("Spiral".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 6,
+            max_attempts: Some(2000),
+            run_layout: false,
+            characteristic_filter: None,
+            rng_seed: Some(7),
+            workers: Some(2),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: Some(2.0 / 6.0),
+            max_center_x: Some(4.0 / 6.0),
+            min_center_y: Some(2.0 / 6.0),
+            max_center_y: Some(4.0 / 6.0),
+            layout_timeout_ms: None,
+        };
+        let outcome = generate_candidates_inner(req, |_| {}).unwrap();
+        assert_eq!(outcome.candidates.len(), 6);
+        for c in &outcome.candidates {
+            let bytes: [u8; 32] = hex::decode(c.seed.trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let (x, y) = qql::art::flow_center_frac(&bytes, render::color_db()).unwrap();
+            assert!((1.0 / 3.0 - 1e-6..=2.0 / 3.0 + 1e-6).contains(&x), "{} x={x}", c.seed);
+            assert!((1.0 / 3.0 - 1e-6..=2.0 / 3.0 + 1e-6).contains(&y), "{} y={y}", c.seed);
+        }
+    }
+
+    #[test]
+    fn structure_only_matches_layout() {
+        // The pre-layout replay must report exactly what a full layout does.
+        // Seedbox seeds cover all three structures.
+        let seeds = [
+            "34a2438811b7dd3d14aca7f31542d4666e4c37ea7f18376cd749ffff10a10a97",
+            "db0df63435a64132ddf7c626011cb3bb370150cba3467b385abaffff10e2c310",
+            "e25ecd59478ce509232e37c2e0810fd4c655b8b4e4fab254db31ffff10e22b37",
+            "d90cebceb3c7c43b9266fc3d0c2083bbf942b79e08ccd211f229ffff11610ad3",
+            "0b62e5caff1b4f9605e78c3ca8016c0a4b4e23cb764fc23fc4cfffff10818aa5",
+            "7e23a0a9fd1105ca4b1dc9b7e0f0aab3b7071caa6f0085961046ffff10a20b12",
+            "82d8e20bdc15dcba70bc1bd2024ec42334141a544e45564d098effff14e8c32f",
+            "b7ea1f23d9956c5f7335285834aa02f2e663ba94112b2ee0343affff10e2ca0b",
+            "b630abd9a5367763b7cba316e870c4a54064cc9fc402a78e685cffff1168c017",
+            "e25ecd59478ce509232e37c2e0810fd4c655b8b4dd11b75d7b0dffff10e9d336",
+            "5c736d849527bb15fbc0111f4ca13b4cfc1a5c8d720b9127bb76ffff1e8d1d7f",
+            "dde2e1aa38442089bdb28be76009f42c65df45db90b8ee473a15ffff10c108aa",
+            "acfa3e822961cede6dabbbeef96838fec3ad3d47e0df837855ddffff10e04337",
+            "9d53fd5e1eb168e58988a9acbd7d7ae7ebba9910aa58b147b662ffff102a4337",
+            "7f7d6bf9256fd67ed85e8fc6805d610de3f002650be19d5bd6e6ffff10e9d357",
+            "4dc6750a016db9a96fef40d852e1faee11733db6fb8cd6b2e6c3ffff1ecdcb26",
+            "7f4679ed286cb37e5925d6ea4e5f75a1bf39df875773bab24742ffff10c18aae",
+            "9380da47618d355a9eec7a2ec37e50c2df9bca6bda64b0ab3c8effff10ea632e",
+            "9275776b9ac4c62ce29a3d3b62623c35961afa9e6e21e777c538ffff12e56335",
+            "039cd535c7d3bcb04e93ad44491b30185ee0a4c536cd91022f55ffff14a50516",
+            "5b33b6f41e87111b7d22685b297f086b5535034dde87421cceecffff10e5032d",
+            "0b62e5caff1b4f9605e78c3ca8016c0a4b4e23cbe32a62fef9a0ffff1069c246",
+            "44266f38ea9ef4e85a77310518b1cb6d5a56349b34b632fc6ef2ffff1021cb17",
+            "7e23a0a9fd1105ca4b1dc9b7e0f0aab3b7071caaf69cffc7d4c4ffff11416c03",
+            "e25ecd59478ce509232e37c2e0810fd4c655b8b46998a80e5857ffff11010aa3",
+            "941beced3e87a15ba22e1a3705b547f50cfd2eb1f876c962d7c5ffff10c1cb0f",
+            "5c736d849527bb15fbc0111f4ca13b4cfc1a5c8dc0261f3c514effff162d0b0a",
+            "be957a475844c127ddd207b4ff1f63900fd13e57fd0ef6b57b44ffff10ea02d7",
+            "7f7d6bf9256fd67ed85e8fc6805d610de3f0026539a23052b635ffff1002ca0b",
+            "d22d6be1929eb090a2aa72243d2c6e4dd325fda287d2871efc57ffff10c162a6",
+        ];
+        for hex_str in seeds {
+            let bytes: [u8; 32] = hex::decode(hex_str).unwrap().try_into().unwrap();
+            let quick = render::structure_only(&bytes);
+            let full = render::layout_only(&bytes).structure();
+            assert_eq!(format!("{quick:?}"), format!("{full:?}"), "seed {hex_str}");
+        }
+    }
+
+    fn formation_request(filter: CharacteristicFilter, count: usize) -> GenerateRequest {
+        let mut choices = TraitChoices::default();
+        choices.structure = Some("Formation".into());
+        choices.flow_field = Some("RandomLinear".into());
+        choices.spacing = Some("Dense".into());
+        GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count,
+            max_attempts: Some(1_000_000),
+            run_layout: false,
+            characteristic_filter: Some(filter),
+            rng_seed: Some(3),
+            workers: Some(4),
+            min_angle_deg: Some(43.0),
+            max_angle_deg: Some(47.0),
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            layout_timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn section_filter_runs_without_layout() {
+        let filter = CharacteristicFilter {
+            max_horizontal_sections: Some(1),
+            max_vertical_sections: Some(1),
+            ..Default::default()
+        };
+        assert!(filter.structure_active() && !filter.points_active());
+        let outcome = generate_candidates_inner(formation_request(filter, 20), |_| {}).unwrap();
+        assert_eq!(outcome.candidates.len(), 20);
+        for c in &outcome.candidates {
+            // No layout ran, so no point-level stats were attached.
+            assert!(c.stats.is_none());
+            let bytes: [u8; 32] = hex::decode(c.seed.trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let dims = render::layout_only(&bytes).formation_dims.unwrap();
+            assert_eq!((dims.horizontal, dims.vertical), (1, 1), "{}", c.seed);
+        }
+    }
+
+    #[test]
+    fn mixed_structure_and_point_filters_still_apply() {
+        let filter = CharacteristicFilter {
+            max_horizontal_sections: Some(2),
+            min_points: Some(20_000),
+            ..Default::default()
+        };
+        assert!(filter.structure_active() && filter.points_active());
+        let outcome = generate_candidates_inner(formation_request(filter, 4), |_| {}).unwrap();
+        assert_eq!(outcome.candidates.len(), 4);
+        for c in &outcome.candidates {
+            let stats = c.stats.as_ref().expect("point filter needs a layout");
+            assert!(stats.num_points >= 20_000, "{}", c.seed);
+            assert!(stats.formation_dims.unwrap().horizontal <= 2, "{}", c.seed);
+        }
+    }
+
+    #[test]
+    fn point_cap_never_changes_which_seeds_pass() {
+        // Stopping at the cap must reject exactly the seeds with more than
+        // `cap` points, and leave everyone else's stats untouched.
+        let seeds = [
+            "09039d8d4698d9274fdb3971296435c2399bb6601387593b4f18ffffbfed0b32",
+            "039cd535c7d3bcb04e93ad44491b30185ee0a4c5054a62710a45ffff10a1ca43",
+            "e21a1c6f4e15a3609d1cd2a7974ec6fb8d53f5941f16ad8eb151ffff10c1c32b",
+            "acfa3e822961cede6dabbbeef96838fec3ad3d47630a0346f8e7ffff11018b03",
+            "34df5e2952ded2c258b1e7861f972b4ab4f9056e2c8d50d7490cffff18fe0b6f",
+            "9380da47618d355a9eec7a2ec37e50c2df9bca6b5d506b09c786ffff1116632d",
+            "54fe3b04afe653ef91dd7e5c1c48d40d903b431a59b48001a29fffff11210aac",
+            "4939c898da18b0c1e71dc2a42aa545ad228711b55c626ca33661ffff10e10b57",
+            "82d8e20bdc15dcba70bc1bd2024ec42334141a543e4f44b3d858ffff12a56534",
+            "37b15e06ad0f4520ccdd8c2557d2a28da0354f7d97070d1f7248ffff10a10a13",
+            "9380da47618d355a9eec7a2ec37e50c2df9bca6b9ba3b818ad0fffff10e14a12",
+            "d138a9b95e50781e247c446c10e197e9d584e197257835120b04ffff10946b37",
+            "3a78551911f2ef8a598053d50939b39fc8ec9390c1d55d2ef110ffff10a24a09",
+            "0b62e5caff1b4f9605e78c3ca8016c0a4b4e23cbca3c666062acffff10e95317",
+            "34a2438811b7dd3d14aca7f31542d4666e4c37ea4389ca80c09cffff11208d12",
+            "d90cebceb3c7c43b9266fc3d0c2083bbf942b79ec55e4027783bffff10e20097",
+            "af12a9af19331fa9b89915537ce9d41bce5e4c5d34a31be40b0cffff10e22b37",
+            "e25ecd59478ce509232e37c2e0810fd4c655b8b4d94fd53f1013ffff10010aa3",
+            "a9022f64e9fd13ffb480f73c84a718bc07043f2a425f4d5fae00ffff10d12515",
+            "acfa3e822961cede6dabbbeef96838fec3ad3d4796481a81e138ffff1181ca23",
+        ];
+        for hex_str in seeds {
+            let bytes: [u8; 32] = hex::decode(hex_str).unwrap().try_into().unwrap();
+            let full = render::layout_only(&bytes);
+            let n = full.num_points;
+            for cap in [n.saturating_sub(1), n, n + 1, n / 2] {
+                let capped = render::layout_only_with_limits(&bytes, None, Some(cap));
+                assert_eq!(capped.is_some(), n <= cap, "seed {hex_str} n={n} cap={cap}");
+                if let Some(c) = capped {
+                    assert_eq!(format!("{c:?}"), format!("{full:?}"), "seed {hex_str}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn background_filter_accepts_any_of_several() {
+        let allowed = vec!["Fidenza Light Green".to_string(), "Fidenza Pink".to_string()];
+        let filter = CharacteristicFilter {
+            background_colors: Some(allowed.clone()),
+            ..Default::default()
+        };
+        assert!(filter.structure_active() && !filter.points_active());
+        let mut choices = TraitChoices::default();
+        choices.color_palette = Some("Fidenza".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 30,
+            max_attempts: Some(10_000),
+            run_layout: false,
+            characteristic_filter: Some(filter),
+            rng_seed: Some(5),
+            workers: Some(4),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            layout_timeout_ms: None,
+        };
+        let outcome = generate_candidates_inner(req, |_| {}).unwrap();
+        assert_eq!(outcome.candidates.len(), 30);
+        let mut seen = std::collections::HashSet::new();
+        for c in &outcome.candidates {
+            let bytes: [u8; 32] = hex::decode(c.seed.trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let bg = render::structure_only(&bytes).background_color;
+            assert!(allowed.contains(&bg), "{} has {bg}", c.seed);
+            seen.insert(bg);
+        }
+        // Both picks should turn up in 30 results (each is ~1/8 of Fidenza).
+        assert_eq!(seen.len(), 2, "{seen:?}");
+    }
+
+    #[test]
+    fn palette_background_odds_sum_to_one() {
+        for p in list_palette_colors() {
+            let total: f64 = p.backgrounds.iter().map(|b| b.odds).sum();
+            assert!((total - 1.0).abs() < 1e-9, "{} sums to {total}", p.palette);
+        }
+    }
+
+    #[test]
+    fn flow_center_frac_matches_layout() {
+        // The cheap pre-layout helper must agree with the center the full
+        // layout reports, for radial seeds (Some) and linear seeds (None).
+        let seeds = [
+            "f30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307",
+            "a9022f64e9fd13ffb480f73c84a718bc07043f2a425f4d5fae00ffff10d12515",
+            "9275776b9ac4c62ce29a3d3b62623c35961afa9e6e21e777c538ffff12e56335",
+            "db0df63435a64132ddf7c626011cb3bb370150cba3467b385abaffff10e2c310",
+            "37b15e06ad0f4520ccdd8c2557d2a28da0354f7d97070d1f7248ffff10a10a13",
+            "44266f38ea9ef4e85a77310518b1cb6d5a56349ba9fb12aa9366ffff10a1c943",
+        ];
+        for hex_str in seeds {
+            let bytes: [u8; 32] = hex::decode(hex_str).unwrap().try_into().unwrap();
+            let quick = qql::art::flow_center_frac(&bytes, render::color_db());
+            let flow = render::layout_only(&bytes).flow;
+            let full = flow.center_x_frac.zip(flow.center_y_frac);
+            assert_eq!(quick, full, "seed {hex_str}");
         }
     }
 

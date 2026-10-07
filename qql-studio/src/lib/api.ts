@@ -86,12 +86,27 @@ export type LayoutStats = {
 	shadowsInfo: ShadowsInfo | null;
 	curveLength: number;
 	splatterOdds: number;
+	flow: FlowInfo;
+};
+export type FlowInfo = {
+	linear: boolean;
+	/** Linear only: underlying line angle folded into 0–90° (0 = horizontal). */
+	angleDeg: number | null;
+	/** Radial only: 0 = straight in/out, 1 = perfectly circular. */
+	circularity: number | null;
+	inward: boolean | null;
+	ccw: boolean | null;
+	/** Radial only: point the flow curls around (fractions of canvas). */
+	centerXFrac: number | null;
+	centerYFrac: number | null;
 };
 
 export type ColorInfo = { name: string; swatch: string };
+/** A palette background, with the chance (0–1) it's picked in that palette. */
+export type BackgroundInfo = ColorInfo & { odds: number };
 export type PaletteColors = {
 	palette: string;
-	backgrounds: ColorInfo[];
+	backgrounds: BackgroundInfo[];
 	primaries: ColorInfo[];
 };
 
@@ -163,7 +178,7 @@ export type CharacteristicFilter = {
 	maxShadowsActualCircles?: number;
 	shadowsColumnarSquare?: boolean;
 	shadowsOutwardRadial?: boolean;
-	backgroundColor?: string;
+	backgroundColors?: string[];
 	ringColors?: string[];
 	exactRingColors?: boolean;
 };
@@ -182,6 +197,11 @@ export type GenerateRequest = {
 	workers?: number;
 	minAngleDeg?: number;
 	maxAngleDeg?: number;
+	/** Spiral center bounds, fractions of canvas width / height. */
+	minCenterX?: number;
+	maxCenterX?: number;
+	minCenterY?: number;
+	maxCenterY?: number;
 	layoutTimeoutMs?: number;
 };
 

@@ -75,6 +75,10 @@
 		Vertical: 90
 	};
 	const fixedAngle = $derived(FIXED_ANGLES[choices.flowField ?? '']);
+	// Spiral center is the mirror image: only radial flows curl around a
+	// center, so it greys out when a linear flow is explicitly chosen.
+	const LINEAR_FLOWS = ['Horizontal', 'Diagonal', 'Vertical', 'RandomLinear'];
+	const centerApplies = $derived(!LINEAR_FLOWS.includes(choices.flowField ?? ''));
 	// Construct-only: traits are encoded directly into each seed. (The Search
 	// mode was removed from the UI; the backend still supports it.)
 	const mode: GenerateMode = 'construct';
@@ -90,18 +94,28 @@
 	// pixel-perfect crispness on a 2× Retina display.
 	const tileDisplayWidth = $derived(Math.round(thumbWidth / 2));
 
-	// When a palette is pinned, only that palette's colors are reachable.
-	const visibleBackgrounds = $derived.by(() => {
-		const selected = choices.colorPalette;
-		const map = new Map<string, ColorInfo>();
-		for (const p of paletteColors) {
-			if (selected && p.palette !== selected) continue;
-			for (const c of p.backgrounds) {
-				map.set(c.name, c);
-			}
+	// When a palette is pinned, only that palette's backgrounds are reachable;
+	// with Palette = Any, every palette's backgrounds are offered, grouped.
+	const backgroundGroups = $derived.by(() =>
+		paletteColors.filter((p) => !choices.colorPalette || p.palette === choices.colorPalette)
+	);
+	// Drop picks the pinned palette can't produce, so a stale selection can't
+	// silently reject every seed.
+	$effect(() => {
+		const reachable = new Set(backgroundGroups.flatMap((p) => p.backgrounds.map((b) => b.name)));
+		if (paletteColors.length && backgroundColors.some((b) => !reachable.has(b))) {
+			backgroundColors = backgroundColors.filter((b) => reachable.has(b));
 		}
-		return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 	});
+	function toggleBackground(name: string) {
+		backgroundColors = backgroundColors.includes(name)
+			? backgroundColors.filter((c) => c !== name)
+			: [...backgroundColors, name];
+	}
+	// "Fidenza Newsprint" → "Newsprint" inside the Fidenza group.
+	const shortBgName = (palette: string, name: string) =>
+		name.startsWith(palette + ' ') ? name.slice(palette.length + 1) : name;
+	const oddsPct = (odds: number) => `${Math.round(odds * 100)}%`;
 	const visiblePrimaries = $derived.by(() => {
 		const selected = choices.colorPalette;
 		const map = new Map<string, ColorInfo>();
@@ -141,6 +155,31 @@
 			maxAngle = 90;
 		}
 	});
+	// Spiral center bounds, in sixths of the canvas (0 = left/top edge,
+	// 6 = right/bottom edge). Centers range from −⅔ to 5⁄3 and the fixed
+	// choices all land on sixths, so −4…10 is the full, unconstrained range.
+	const CENTER_LO = -4;
+	const CENTER_HI = 10;
+	let centerXMin = $state<number>(CENTER_LO);
+	let centerXMax = $state<number>(CENTER_HI);
+	let centerYMin = $state<number>(CENTER_LO);
+	let centerYMax = $state<number>(CENTER_HI);
+	function setCenter(lo: number, hi: number) {
+		centerXMin = centerYMin = lo;
+		centerXMax = centerYMax = hi;
+	}
+	const centerActive = $derived(
+		centerApplies &&
+			(centerXMin > CENTER_LO ||
+				centerXMax < CENTER_HI ||
+				centerYMin > CENTER_LO ||
+				centerYMax < CENTER_HI)
+	);
+	$effect(() => {
+		if (!centerApplies) setCenter(CENTER_LO, CENTER_HI);
+	});
+	const sixthPct = (k: number) => `${Math.round((k / 6) * 100)}%`;
+	const centerPos = (k: number) => ((k - CENTER_LO) / (CENTER_HI - CENTER_LO)) * 100;
 	let cornerConcentration = $state<'' | 'TL' | 'TR' | 'BL' | 'BR' | 'AnyLeft' | 'AnyRight'>('');
 	let cornerRatio = $state<number>(1.5);
 	let minHorizontalSections = $state<number | null>(null);
@@ -239,7 +278,7 @@
 	// Orbital split offset bounds in degrees (rarely useful).
 	let minSplitOffsetDeg = $state<number | null>(null);
 	let maxSplitOffsetDeg = $state<number | null>(null);
-	let backgroundColor = $state<string>('');
+	let backgroundColors = $state<string[]>([]);
 	let ringColors = $state<string[]>([]);
 	let exactRingColors = $state<boolean>(false);
 	let splatterMode = $state<'' | 'none' | 'any' | 'light' | 'moderate' | 'heavy'>('');
@@ -324,6 +363,11 @@
 				thumbWidth = typeof s.thumbWidth === 'number' ? s.thumbWidth : 720;
 				minAngle = typeof s.minAngle === 'number' ? s.minAngle : 0;
 				maxAngle = typeof s.maxAngle === 'number' ? s.maxAngle : 90;
+				const num = (v: unknown, d: number) => (typeof v === 'number' ? v : d);
+				centerXMin = num(s.centerXMin, CENTER_LO);
+				centerXMax = num(s.centerXMax, CENTER_HI);
+				centerYMin = num(s.centerYMin, CENTER_LO);
+				centerYMax = num(s.centerYMax, CENTER_HI);
 				layoutTimeoutEnabled =
 					typeof s.layoutTimeoutEnabled === 'boolean'
 						? s.layoutTimeoutEnabled
@@ -361,6 +405,10 @@
 					thumbWidth,
 					minAngle,
 					maxAngle,
+					centerXMin,
+					centerXMax,
+					centerYMin,
+					centerYMax,
 					layoutTimeoutEnabled,
 					layoutTimeoutSeconds,
 					runLayout,
@@ -499,7 +547,7 @@
 				})(),
 				minSplitOffsetDeg: minSplitOffsetDeg ?? undefined,
 				maxSplitOffsetDeg: maxSplitOffsetDeg ?? undefined,
-				backgroundColor: backgroundColor || undefined,
+				backgroundColors: backgroundColors.length > 0 ? backgroundColors : undefined,
 				ringColors: ringColors.length > 0 ? ringColors : undefined,
 				exactRingColors: ringColors.length > 0 ? exactRingColors : undefined,
 				splatterMode: splatterMode || undefined,
@@ -574,10 +622,16 @@
 				count,
 				maxAttempts: maxAttempts ?? undefined,
 				workers: workers > 0 ? workers : undefined,
-				runLayout: runLayout || isCharFilterActive,
+				// The backend lays out a seed only when a point-level filter needs
+				// it; structure filters are checked without one.
+				runLayout,
 				characteristicFilter: isCharFilterActive ? charFilter : undefined,
 				minAngleDeg: angleActive ? minAngle : undefined,
 				maxAngleDeg: angleActive ? maxAngle : undefined,
+				minCenterX: centerActive ? centerXMin / 6 : undefined,
+				maxCenterX: centerActive ? centerXMax / 6 : undefined,
+				minCenterY: centerActive ? centerYMin / 6 : undefined,
+				maxCenterY: centerActive ? centerYMax / 6 : undefined,
 				layoutTimeoutMs:
 					layoutTimeoutEnabled && layoutTimeoutSeconds > 0
 						? Math.round(layoutTimeoutSeconds * 1000)
@@ -913,26 +967,36 @@
 		<section class="group group-colors">
 			<div class="section-head">
 				<h2>Colors</h2>
-				<small class="hint">requires layout</small>
+				<small class="hint">ring colors need layout</small>
 			</div>
 
-			<div class="subhead">Background</div>
-			<label class="block">
-				<select bind:value={backgroundColor}>
-					<option value="">Any background</option>
-					{#each visibleBackgrounds as c}
-						<option value={c.name}>{c.name}</option>
-					{/each}
-				</select>
-			</label>
-			{#if backgroundColor}
-				{@const swatch = visibleBackgrounds.find((c) => c.name === backgroundColor)}
-				{#if swatch}
-					<div class="bg-preview">
-						<span class="swatch" style="background:{swatch.swatch}"></span>
-						<span>{swatch.name}</span>
-					</div>
+			<div class="subhead">Background <small>fast</small></div>
+			{#each backgroundGroups as group (group.palette)}
+				{#if !choices.colorPalette}
+					<div class="bg-group-label">{group.palette}</div>
 				{/if}
+				<div class="color-chips-grid">
+					{#each group.backgrounds as c (c.name)}
+						<button
+							type="button"
+							class="chip-button"
+							class:selected={backgroundColors.includes(c.name)}
+							onclick={() => toggleBackground(c.name)}
+							title="{c.name} — picked for {oddsPct(c.odds)} of {group.palette} seeds"
+						>
+							<span class="swatch" style="background:{c.swatch}"></span>
+							<span class="chip-name">{shortBgName(group.palette, c.name)}</span>
+							<span class="chip-odds">{oddsPct(c.odds)}</span>
+						</button>
+					{/each}
+				</div>
+			{/each}
+			{#if backgroundColors.length > 0}
+				<button class="ghost" onclick={() => (backgroundColors = [])}>
+					clear backgrounds ({backgroundColors.length})
+				</button>
+			{:else}
+				<small class="bg-hint">none selected = any background · % = how often it's picked in its palette</small>
 			{/if}
 
 			<div class="subhead">Ring colors</div>
@@ -965,7 +1029,7 @@
 				</button>
 			{/if}
 
-			<div class="subhead">Splatter</div>
+			<div class="subhead">Splatter <small>fast</small></div>
 			<label class="block">
 				<select bind:value={splatterMode}>
 					<option value="">Any</option>
@@ -1003,7 +1067,7 @@
 		<section class="group group-composition">
 			<div class="section-head">
 				<h2>Composition</h2>
-				<small class="hint">requires layout</small>
+				<small class="hint">corner concentration needs layout</small>
 			</div>
 
 			<fieldset class="struct-group" disabled={!angleApplies}>
@@ -1036,6 +1100,7 @@
 						(maxAngle / 90) * 100}%"
 				></div>
 				<input
+					class:raised={minAngle === maxAngle && minAngle > 45}
 					type="range"
 					min="0"
 					max="90"
@@ -1069,6 +1134,114 @@
 					change what you get. Use RandomLinear for angles in between.
 				</div>
 			{/if}
+			</fieldset>
+
+			<fieldset class="struct-group" disabled={!centerApplies}>
+			<div class="subhead">
+				Spiral center
+				{@render spiralCenterInfo()}
+				{#if !centerApplies}
+					<small class="locked">n/a — linear flow has no center</small>
+				{:else if !choices.flowField}
+					<small>excludes linear flows when set</small>
+				{/if}
+			</div>
+			<div class="center-picker">
+				<svg class="center-map" viewBox="0 0 56 70" aria-hidden="true">
+					<rect class="map-bg" x="0" y="0" width="56" height="70" />
+					<rect
+						class="map-sel"
+						x={(centerXMin - CENTER_LO) * 4}
+						y={(centerYMin - CENTER_LO) * 5}
+						width={Math.max((centerXMax - centerXMin) * 4, 1)}
+						height={Math.max((centerYMax - centerYMin) * 5, 1)}
+					/>
+					<rect class="map-canvas" x="16" y="20" width="24" height="30" />
+				</svg>
+				<div class="center-sliders">
+					<div class="angle-head">
+						<span class="center-axis">Left → right</span>
+						<span class="angle-readout">{sixthPct(centerXMin)} – {sixthPct(centerXMax)}</span>
+					</div>
+					<div class="dual-range">
+						<div class="track"></div>
+						<div
+							class="track-canvas"
+							style="left: {centerPos(0)}%; right: {100 - centerPos(6)}%"
+						></div>
+						<div
+							class="track-fill"
+							style="left: {centerPos(centerXMin)}%; right: {100 - centerPos(centerXMax)}%"
+						></div>
+						<input
+							class:raised={centerXMin === centerXMax && centerXMin > 3}
+							type="range"
+							min={CENTER_LO}
+							max={CENTER_HI}
+							step="1"
+							bind:value={centerXMin}
+							oninput={() => {
+								if (centerXMin > centerXMax) centerXMin = centerXMax;
+							}}
+							aria-label="Spiral center leftmost position"
+						/>
+						<input
+							type="range"
+							min={CENTER_LO}
+							max={CENTER_HI}
+							step="1"
+							bind:value={centerXMax}
+							oninput={() => {
+								if (centerXMax < centerXMin) centerXMax = centerXMin;
+							}}
+							aria-label="Spiral center rightmost position"
+						/>
+					</div>
+					<div class="angle-head">
+						<span class="center-axis">Top → bottom</span>
+						<span class="angle-readout">{sixthPct(centerYMin)} – {sixthPct(centerYMax)}</span>
+					</div>
+					<div class="dual-range">
+						<div class="track"></div>
+						<div
+							class="track-canvas"
+							style="left: {centerPos(0)}%; right: {100 - centerPos(6)}%"
+						></div>
+						<div
+							class="track-fill"
+							style="left: {centerPos(centerYMin)}%; right: {100 - centerPos(centerYMax)}%"
+						></div>
+						<input
+							class:raised={centerYMin === centerYMax && centerYMin > 3}
+							type="range"
+							min={CENTER_LO}
+							max={CENTER_HI}
+							step="1"
+							bind:value={centerYMin}
+							oninput={() => {
+								if (centerYMin > centerYMax) centerYMin = centerYMax;
+							}}
+							aria-label="Spiral center topmost position"
+						/>
+						<input
+							type="range"
+							min={CENTER_LO}
+							max={CENTER_HI}
+							step="1"
+							bind:value={centerYMax}
+							oninput={() => {
+								if (centerYMax < centerYMin) centerYMax = centerYMin;
+							}}
+							aria-label="Spiral center bottommost position"
+						/>
+					</div>
+				</div>
+			</div>
+			<div class="center-presets">
+				<button class="ghost" onclick={() => setCenter(CENTER_LO, CENTER_HI)}>anywhere</button>
+				<button class="ghost" onclick={() => setCenter(0, 6)}>on canvas</button>
+				<button class="ghost" onclick={() => setCenter(2, 4)}>middle</button>
+			</div>
 			</fieldset>
 
 			<div class="subhead">Corner concentration</div>
@@ -1119,7 +1292,7 @@
 				<div class="section-head">
 					<h2>Formation structure{@render formationInfo()}</h2>
 					{#if formationEnabled}
-						<small class="hint">requires layout</small>
+						<small class="hint fast">fast · no layout</small>
 					{:else}
 						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
@@ -1207,7 +1380,7 @@
 				<div class="section-head">
 					<h2>Orbital structure{@render orbitalInfo()}</h2>
 					{#if orbitalEnabled}
-						<small class="hint">requires layout</small>
+						<small class="hint fast">fast · no layout</small>
 					{:else}
 						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
@@ -1372,7 +1545,7 @@
 				<div class="section-head">
 					<h2>Shadows structure{@render shadowsInfo()}</h2>
 					{#if shadowsEnabled}
-						<small class="hint">requires layout</small>
+						<small class="hint fast">fast · no layout</small>
 					{:else}
 						<small class="hint locked">n/a — Structure is {choices.structure}</small>
 					{/if}
@@ -1628,6 +1801,43 @@
 <!-- Filter help content. Each snippet renders a FilterInfo "i" button plus the
      popup body for one filter; keeping them together makes the copy easy to
      review and extend as more filters get explanations. -->
+{#snippet spiralCenterInfo()}
+	<FilterInfo title="Spiral center">
+		<p>
+			<strong>Where the swirl is centered.</strong> Radial flow fields (Explosive, Spiral,
+			Circular, RandomRadial) curl every dot-trail around one point. This filter sets where
+			that point is allowed to be, as a percentage of the canvas: 0% is the left or top edge,
+			100% the right or bottom edge.
+		</p>
+		<p>
+			<strong>The center is often off the canvas.</strong> It can land anywhere from −67% to
+			167%, so many pieces show only the outer arc of a swirl. Set both sliders to
+			0–100% (<em>on canvas</em>) to see the eye of the spiral, or narrow them to the
+			<em>middle</em> third for a centered swirl.
+		</p>
+		<p>
+			Most centers snap to a third or a half of the canvas (0%, 33%, 50%, 67%, 100%, and so
+			on), and about one in six lands at a random spot on the canvas. The map shows the
+			canvas as the inner rectangle and your selection in green.
+		</p>
+		<p>
+			What the center looks like depends on the flow. On a Spiral or Circular piece it's the
+			eye of the swirl; on Explosive it's the point everything bursts out from (or rushes
+			into). This is the flow field's center, not the Orbital structure's center. The two are
+			picked separately.
+		</p>
+		<p>
+			<strong>Watch out with Flow field = Any:</strong> linear pieces have no center, so
+			setting this filter at all leaves them out. Turbulence also bends the trails, so on
+			High turbulence the visible swirl can drift away from this point.
+		</p>
+		<div class="tip">
+			<strong>Fast to search.</strong> The center is known before any dots are laid out, so
+			even a tight range skips non-matching seeds almost instantly.
+		</div>
+	</FilterInfo>
+{/snippet}
+
 {#snippet flowAngleInfo()}
 	<FilterInfo title="Flow angle">
 		<p>
@@ -2132,6 +2342,9 @@
 		color: #555;
 		font-size: 11px;
 	}
+	.hint.fast {
+		color: #4cb088;
+	}
 	.label {
 		display: block;
 		font-size: 11px;
@@ -2327,6 +2540,12 @@
 		padding: 0;
 		border: 0;
 	}
+	/* The max handle is stacked above the min handle. When both meet in the
+	   right half, raise the min one — otherwise the max handle can't move left
+	   (it can't pass min) and the min handle is unreachable underneath it. */
+	.dual-range input[type='range'].raised {
+		z-index: 1;
+	}
 	.dual-range input[type='range']::-webkit-slider-runnable-track {
 		background: transparent;
 		border: 0;
@@ -2344,6 +2563,51 @@
 		margin-top: 0;
 		cursor: pointer;
 		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+	}
+	.center-picker {
+		display: flex;
+		gap: 10px;
+		align-items: center;
+	}
+	.center-map {
+		width: 56px;
+		height: 70px;
+		flex-shrink: 0;
+	}
+	.center-map .map-bg {
+		fill: #1c1c1c;
+	}
+	.center-map .map-sel {
+		fill: rgba(76, 176, 136, 0.45);
+		stroke: #4cb088;
+		stroke-width: 0.6;
+	}
+	.center-map .map-canvas {
+		fill: none;
+		stroke: #ddd;
+		stroke-width: 0.8;
+	}
+	.center-sliders {
+		flex: 1;
+		min-width: 0;
+	}
+	.center-axis {
+		font-size: 11px;
+		color: #888;
+	}
+	/* Marks the on-canvas stretch (0–100%) of a spiral center slider. */
+	.dual-range .track-canvas {
+		position: absolute;
+		top: 11px;
+		height: 8px;
+		border-left: 1px solid #666;
+		border-right: 1px solid #666;
+		background: #353535;
+	}
+	.center-presets {
+		display: flex;
+		gap: 6px;
+		margin-top: 4px;
 	}
 	.angle-legend {
 		display: flex;
@@ -2400,14 +2664,6 @@
 		background: #15181b;
 		border-left-color: #7f96ad;
 	}
-	.bg-preview {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-top: 4px;
-		font-size: 12px;
-		color: #ccc;
-	}
 	.swatch {
 		display: inline-block;
 		width: 14px;
@@ -2442,6 +2698,25 @@
 		background: #1d3a2a;
 		border-color: #3a8b66;
 		color: #fff;
+	}
+	.chip-odds {
+		font-size: 10px;
+		color: #777;
+		font-variant-numeric: tabular-nums;
+	}
+	.chip-button.selected .chip-odds {
+		color: #9fd4bb;
+	}
+	.bg-group-label {
+		font-size: 10px;
+		color: #777;
+		margin: 8px 0 0;
+	}
+	.bg-hint {
+		display: block;
+		font-size: 10px;
+		color: #555;
+		margin-top: 4px;
 	}
 	.chip-name {
 		flex: 1;
