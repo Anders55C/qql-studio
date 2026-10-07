@@ -178,6 +178,13 @@ fn main() {
                 );
             }
         }
+        if let Some((fx, fy)) = summary.flow.center_frac {
+            let on = (0.0..=1.0).contains(&fx) && (0.0..=1.0).contains(&fy);
+            println!(
+                "  flow center     ({:.3}, {:.3}) [{}]  (what the flow curls around; independent of the orbital center)",
+                fx, fy, if on { "on" } else { "off" }
+            );
+        }
         println!();
     }
 }

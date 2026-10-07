@@ -544,18 +544,33 @@ pub struct FlowField(pub Box<[[f64; FLOW_FIELD_ROWS]; FLOW_FIELD_COLS]>);
 
 impl FlowField {
     pub fn build(spec: &FlowFieldSpec, traits: &Traits, rng: &mut Rng) -> Self {
-        let mut ff = match spec {
-            FlowFieldSpec::Linear { default_theta } => Self::raw_linear(*default_theta),
+        Self::build_with_center(spec, traits, rng).0
+    }
+
+    /// Like [`build`](Self::build), but also returns the point a radial flow
+    /// field curls around (virtual canvas coordinates). `None` for linear
+    /// fields. Consumes exactly the same RNG draws as `build`.
+    pub fn build_with_center(
+        spec: &FlowFieldSpec,
+        traits: &Traits,
+        rng: &mut Rng,
+    ) -> (Self, Option<(f64, f64)>) {
+        let (mut ff, center) = match spec {
+            FlowFieldSpec::Linear { default_theta } => (Self::raw_linear(*default_theta), None),
             FlowFieldSpec::Radial {
                 circularity,
                 direction,
                 rotation,
                 default_theta: _,
-            } => Self::raw_circular(*circularity, *direction, *rotation, traits.version, rng),
+            } => {
+                let (ff, c) =
+                    Self::raw_circular(*circularity, *direction, *rotation, traits.version, rng);
+                (ff, Some(c))
+            }
         };
         let disturbances = Disturbance::build(traits, rng);
         ff.adjust(&disturbances);
-        ff
+        (ff, center)
     }
 
     fn constant_flow_field(theta: f64) -> Box<[[f64; FLOW_FIELD_ROWS]; FLOW_FIELD_COLS]> {
@@ -568,24 +583,10 @@ impl FlowField {
         FlowField(Self::constant_flow_field(default_theta))
     }
 
-    fn raw_circular(
-        circularity: f64,
-        direction: Direction,
-        rotation: Rotation,
-        version: Version,
-        rng: &mut Rng,
-    ) -> Self {
-        let mut rot = circularity / 2.0;
-        if let Direction::Out = direction {
-            rot = 1.0 - rot;
-        }
-        if let Rotation::Cw = rotation {
-            rot = 2.0 - rot;
-        }
-        rot = pi(rot);
-
-        let mut flow_points = Self::constant_flow_field(0.0);
-
+    /// Picks the point a radial flow field curls around (virtual canvas
+    /// coordinates). Split out of `raw_circular` so filters can read the
+    /// center without building the field; consumes the same RNG draws.
+    fn pick_center(version: Version, rng: &mut Rng) -> (f64, f64) {
         let cx = {
             let fst = rng.uniform(w(0.0), w(1.0));
             *rng.wc(&[
@@ -620,6 +621,27 @@ impl FlowField {
                 (h(5.0 / 3.0), 0.5),
             ])
         };
+        (cx, cy)
+    }
+
+    fn raw_circular(
+        circularity: f64,
+        direction: Direction,
+        rotation: Rotation,
+        version: Version,
+        rng: &mut Rng,
+    ) -> (Self, (f64, f64)) {
+        let mut rot = circularity / 2.0;
+        if let Direction::Out = direction {
+            rot = 1.0 - rot;
+        }
+        if let Rotation::Cw = rotation {
+            rot = 2.0 - rot;
+        }
+        rot = pi(rot);
+
+        let mut flow_points = Self::constant_flow_field(0.0);
+        let (cx, cy) = Self::pick_center(version, rng);
 
         let mut x = LX;
         for col in &mut *flow_points {
@@ -634,7 +656,7 @@ impl FlowField {
             }
             x += SPC;
         }
-        FlowField(flow_points)
+        (FlowField(flow_points), (cx, cy))
     }
 
     fn adjust(&mut self, disturbances: &[Disturbance]) {
@@ -717,10 +739,32 @@ impl IgnoreFlowField {
     }
 }
 
+/// The piece's flow lines, traced lazily: each line is followed through the
+/// flow field only when point placement reaches it (see [`Points::build`]).
+/// Tracing consumes no randomness beyond the one per-group `ignore` draw,
+/// which is still made here, up front, in the original order — so the result
+/// is identical to tracing everything eagerly, but a layout that stops early
+/// (deadline or point cap) skips the lines it never reaches.
 #[derive(Debug)]
-pub struct GroupedFlowLines(pub Vec<FlowLineGroup>);
-type FlowLineGroup = Vec<FlowLine>;
-type FlowLine = Vec<(f64, f64)>;
+pub struct GroupedFlowLines {
+    groups: Vec<FlowLineGroup>,
+    tracer: FlowLineTracer,
+}
+
+#[derive(Debug)]
+struct FlowLineGroup {
+    start_points: Vec<(f64, f64)>,
+    /// Whether this group's lines ignore the flow field and run straight.
+    ignore: bool,
+}
+
+#[derive(Debug)]
+struct FlowLineTracer {
+    flow_field: FlowField,
+    ignore_cos_sin: (f64, f64),
+    curve_length: usize,
+    trig: TrigCache,
+}
 
 impl GroupedFlowLines {
     pub fn build(
@@ -741,7 +785,7 @@ impl GroupedFlowLines {
         start_point_groups: StartPointGroups,
         rng: &mut Rng,
     ) -> (Self, usize) {
-        let mut curve_length = *rng.choice(&[500, 650, 850]);
+        let mut curve_length = Self::pick_curve_length(rng);
         // Debug-only override (set QQL_FORCE_CURVE_LEN=<n>). The rng draw above
         // still happens, so structure/palette/flow field are unchanged — but the
         // piece is NOT otherwise identical: each point surviving the collision
@@ -757,47 +801,74 @@ impl GroupedFlowLines {
         let groups = start_point_groups
             .0
             .into_iter()
-            .map(|group| {
-                Self::build_group(group, curve_length, &flow_field, &ignore_flow_field, rng)
+            .map(|start_points| FlowLineGroup {
+                start_points,
+                ignore: rng.odds(ignore_flow_field.odds),
             })
-            .collect::<Vec<FlowLineGroup>>();
-        (GroupedFlowLines(groups), curve_length)
+            .collect();
+        let theta = ignore_flow_field.default_theta;
+        let tracer = FlowLineTracer {
+            flow_field,
+            ignore_cos_sin: (cos(theta), sin(theta)),
+            curve_length,
+            trig: TrigCache::new(),
+        };
+        (GroupedFlowLines { groups, tracer }, curve_length)
     }
 
-    fn build_group(
-        start_points: Vec<(f64, f64)>,
-        curve_length: usize,
-        flow_field: &FlowField,
-        ignore_flow_field: &IgnoreFlowField,
-        rng: &mut Rng,
-    ) -> FlowLineGroup {
-        let ignore = rng.odds(ignore_flow_field.odds);
+    /// The first draw `build_with_info` makes: the piece's flow-line length.
+    fn pick_curve_length(rng: &mut Rng) -> usize {
+        *rng.choice(&[500, 650, 850])
+    }
+}
+
+impl FlowLineTracer {
+    /// Follows the flow field from `(x, y)` for up to `curve_length` steps,
+    /// writing the visited positions into `out` (cleared first).
+    fn trace(&mut self, (mut x, mut y): (f64, f64), ignore: bool, out: &mut Vec<(f64, f64)>) {
+        out.clear();
         let step = w(0.002);
-        start_points
-            .into_iter()
-            .map(|(mut x, mut y)| {
-                let mut curve: FlowLine = Vec::with_capacity(curve_length);
-                for _ in 0..curve_length {
-                    #[allow(clippy::manual_range_contains)]
-                    if x < LX || x >= RX || y < TY || y >= BY {
-                        // Terminate the flow line as it has exited the flow field boundary.
-                        curve.shrink_to_fit();
-                        break;
-                    }
-                    let xi = ((x - LX) / SPC).floor() as usize;
-                    let yi = ((y - TY) / SPC).floor() as usize;
-                    let theta = if ignore {
-                        ignore_flow_field.default_theta
-                    } else {
-                        flow_field.0[xi][yi]
-                    };
-                    curve.push((x, y));
-                    x += step * cos(theta);
-                    y += step * sin(theta);
-                }
-                curve
-            })
-            .collect()
+        for _ in 0..self.curve_length {
+            #[allow(clippy::manual_range_contains)]
+            if x < LX || x >= RX || y < TY || y >= BY {
+                // Terminate the flow line as it has exited the flow field boundary.
+                break;
+            }
+            let xi = ((x - LX) / SPC).floor() as usize;
+            let yi = ((y - TY) / SPC).floor() as usize;
+            let (c, s) = if ignore {
+                self.ignore_cos_sin
+            } else {
+                self.trig.get(&self.flow_field, xi, yi)
+            };
+            out.push((x, y));
+            x += step * c;
+            y += step * s;
+        }
+    }
+}
+
+/// Remembers `(cos θ, sin θ)` for each flow-field cell once it's been looked
+/// up. A cell's angle is fixed for the whole piece and flow lines cross the
+/// same cells many times, so this replaces most of the (slow, `%`-heavy)
+/// table-interpolated trig in flow-line tracing. Same inputs to the same
+/// functions, so results are bit-identical.
+#[derive(Debug)]
+struct TrigCache(Vec<(f64, f64)>);
+
+impl TrigCache {
+    fn new() -> Self {
+        TrigCache(vec![(f64::NAN, f64::NAN); FLOW_FIELD_COLS * FLOW_FIELD_ROWS])
+    }
+
+    #[inline]
+    fn get(&mut self, flow_field: &FlowField, xi: usize, yi: usize) -> (f64, f64) {
+        let slot = &mut self.0[xi * FLOW_FIELD_ROWS + yi];
+        if slot.0.is_nan() {
+            let theta = flow_field.0[xi][yi];
+            *slot = (cos(theta), sin(theta));
+        }
+        *slot
     }
 }
 
@@ -951,13 +1022,16 @@ impl Points {
             colors_used,
             rng,
             None,
+            None,
         )
-        .expect("no deadline => never aborts")
+        .expect("no deadline or point cap => never aborts")
     }
 
     /// Like [`build`], but if `deadline` is `Some`, periodically checks the
     /// clock between flow lines and returns `None` if the deadline has passed.
-    /// Used to bound worst-case time on dense pieces.
+    /// Used to bound worst-case time on dense pieces. Likewise returns `None`
+    /// as soon as more than `max_points` points have been placed, for filters
+    /// that only need to know the piece is over a point budget.
     #[allow(clippy::too_many_arguments)]
     pub fn build_with_deadline(
         traits: &Traits,
@@ -972,6 +1046,7 @@ impl Points {
         colors_used: &mut ColorsUsed,
         rng: &mut Rng,
         deadline: Option<Instant>,
+        max_points: Option<usize>,
     ) -> Option<(Points, GroupSizes)> {
         fn random_idx(len: usize, rng: &mut Rng) -> usize {
             rng.uniform(0.0, len as f64) as usize
@@ -983,9 +1058,11 @@ impl Points {
         let margin_checker = MarginChecker::from_traits(traits);
 
         let mut all_points = Vec::new();
-        let mut group_sizes = Vec::with_capacity(grouped_flow_lines.0.len());
+        let GroupedFlowLines { groups, mut tracer } = grouped_flow_lines;
+        let mut line_buf = Vec::with_capacity(tracer.curve_length);
+        let mut group_sizes = Vec::with_capacity(groups.len());
         let dump_points = std::env::var("QQL_DUMP_POINTS").is_ok();
-        for (group_idx, group) in grouped_flow_lines.0.into_iter().enumerate() {
+        for (group_idx, group) in groups.into_iter().enumerate() {
             if let Some(d) = deadline {
                 if Instant::now() >= d {
                     return None;
@@ -1003,6 +1080,8 @@ impl Points {
                 &mut all_points,
                 color_db,
                 group,
+                &mut tracer,
+                &mut line_buf,
                 color_scheme,
                 primary_color_idx,
                 secondary_color_idx,
@@ -1016,6 +1095,7 @@ impl Points {
                 colors_used,
                 rng,
                 deadline,
+                max_points,
             );
             if aborted {
                 return None;
@@ -1039,12 +1119,15 @@ impl Points {
         Some((Points(all_points), GroupSizes(group_sizes)))
     }
 
-    /// Returns `true` if the build was aborted because the deadline expired.
+    /// Returns `true` if the build was aborted because the deadline expired
+    /// or more than `max_points` points were placed.
     #[allow(clippy::too_many_arguments)]
     fn build_group(
         dest: &mut Vec<Point>,
         color_db: &ColorDb,
         group: FlowLineGroup,
+        tracer: &mut FlowLineTracer,
+        line_buf: &mut Vec<(f64, f64)>,
         color_scheme: &ColorScheme,
         mut primary_color_idx: usize,
         mut secondary_color_idx: usize,
@@ -1058,6 +1141,7 @@ impl Points {
         colors_used: &mut ColorsUsed,
         rng: &mut Rng,
         deadline: Option<Instant>,
+        max_points: Option<usize>,
     ) -> bool {
         if rng.odds(color_change_odds.line) {
             scale_generator.change(rng);
@@ -1084,13 +1168,14 @@ impl Points {
             rng,
         );
 
-        for flow_line in group {
+        for &start in &group.start_points {
             if let Some(d) = deadline {
                 if Instant::now() >= d {
                     return true;
                 }
             }
-            for (x, y) in flow_line {
+            tracer.trace(start, group.ignore, line_buf);
+            for &(x, y) in line_buf.iter() {
                 let mut multiplier = spacing_spec.multiplier;
                 if scale > w(0.015) {
                     multiplier = multiplier.max(1.02);
@@ -1114,7 +1199,10 @@ impl Points {
                     primary_color,
                     secondary_color,
                     bullseye,
-                })
+                });
+                if max_points.is_some_and(|m| dest.len() > m) {
+                    return true;
+                }
             }
 
             // For the next line/dot-sequence, potentially change the color and scale
@@ -1849,6 +1937,7 @@ pub struct RenderData {
     pub shadows_info: Option<ShadowsInfo>,
     pub curve_length: usize,
     pub splatter_odds: f64,
+    pub flow: FlowInfo,
 }
 
 pub fn draw<F: FnMut(Frame)>(
@@ -1869,7 +1958,8 @@ pub fn draw<F: FnMut(Frame)>(
     let mut bullseye_generator = BullseyeGenerator::from_traits(&traits, &mut rng);
     let color_scheme = ColorScheme::from_traits(&traits, color_db, &mut rng);
 
-    let flow_field = FlowField::build(&flow_field_spec, &traits, &mut rng);
+    let (flow_field, flow_center) =
+        FlowField::build_with_center(&flow_field_spec, &traits, &mut rng);
     eprintln!("built flow field");
     let ignore_flow_field = IgnoreFlowField::build(&flow_field_spec, &mut rng);
     // Debug-only flow-field export (set QQL_DUMP_FLOWFIELD=<path>). Writes the
@@ -2166,6 +2256,120 @@ pub fn draw<F: FnMut(Frame)>(
         shadows_info: shadows_info_summary,
         curve_length: curve_length_summary,
         splatter_odds: splatter_odds_summary,
+        flow: FlowInfo::new(&flow_field_spec, flow_center),
+    }
+}
+
+/// The point a radial flow field curls around, as a fraction of canvas
+/// width / height, or `None` for linear flow fields. Replays only the RNG
+/// draws that precede the flow field, so it's far cheaper than a layout —
+/// meant for rejecting seeds before running one.
+pub fn flow_center_frac(seed: &[u8; 32], color_db: &ColorDb) -> Option<(f64, f64)> {
+    let traits = Traits::from_seed(seed);
+    let mut rng = Rng::from_seed(&seed[..]);
+
+    let flow_field_spec = FlowFieldSpec::from_traits(&traits, &mut rng);
+    if let FlowFieldSpec::Linear { .. } = flow_field_spec {
+        return None;
+    }
+    let _ = SpacingSpec::from_traits(&traits, &mut rng);
+    let _ = ColorChangeOdds::from_traits(&traits, &mut rng);
+    let _ = ScaleGenerator::from_traits(&traits, &mut rng);
+    let _ = BullseyeGenerator::from_traits(&traits, &mut rng);
+    let _ = ColorScheme::from_traits(&traits, color_db, &mut rng);
+    let (cx, cy) = FlowField::pick_center(traits.version, &mut rng);
+    Some((cx / w(1.0), cy / h(1.0)))
+}
+
+/// Everything about a piece that's decided before any dots are placed:
+/// structure details, curve length, background and splatter. Returned by
+/// [`structure_preview`].
+#[derive(Debug, Clone, Copy)]
+pub struct StructurePreview {
+    pub formation_dims: Option<FormationDims>,
+    pub orbital_info: Option<OrbitalInfo>,
+    pub shadows_info: Option<ShadowsInfo>,
+    pub curve_length: usize,
+    pub background_color: ColorKey,
+    pub splatter_odds: f64,
+}
+
+/// Replays a layout up to (but not including) flow-line tracing and point
+/// placement, returning the values that are already fixed by then. These
+/// match the corresponding [`LayoutSummary`] fields exactly, at a small
+/// fraction of the cost — meant for rejecting seeds before a full layout.
+pub fn structure_preview(seed: &[u8; 32], color_db: &ColorDb) -> StructurePreview {
+    let traits = Traits::from_seed(seed);
+    let mut rng = Rng::from_seed(&seed[..]);
+
+    let flow_field_spec = FlowFieldSpec::from_traits(&traits, &mut rng);
+    let _ = SpacingSpec::from_traits(&traits, &mut rng);
+    let _ = ColorChangeOdds::from_traits(&traits, &mut rng);
+    let _ = ScaleGenerator::from_traits(&traits, &mut rng);
+    let _ = BullseyeGenerator::from_traits(&traits, &mut rng);
+    let color_scheme = ColorScheme::from_traits(&traits, color_db, &mut rng);
+    // Make the flow field's random draws without building it: filling the
+    // grid and applying turbulence consume no randomness, and turbulence is
+    // the slowest part of a layout before point placement.
+    if let FlowFieldSpec::Radial { .. } = flow_field_spec {
+        let _ = FlowField::pick_center(traits.version, &mut rng);
+    }
+    let _ = Disturbance::build(&traits, &mut rng);
+    let _ = IgnoreFlowField::build(&flow_field_spec, &mut rng);
+    let (_, structure_info) = StartPointGroups::build_with_info(traits.structure, &mut rng);
+    let curve_length = GroupedFlowLines::pick_curve_length(&mut rng);
+
+    StructurePreview {
+        formation_dims: structure_info.formation,
+        orbital_info: structure_info.orbital,
+        shadows_info: structure_info.shadows,
+        curve_length,
+        background_color: color_scheme.background,
+        splatter_odds: color_scheme.splatter_odds,
+    }
+}
+
+/// How a piece's flow field is set up (before turbulence disturbances).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlowInfo {
+    /// True for Horizontal / Diagonal / Vertical / RandomLinear.
+    pub linear: bool,
+    /// Base direction in radians, [0, 2π). For linear fields this is the line
+    /// direction; for radial fields it's only used by flow lines that ignore
+    /// the field.
+    pub default_theta: f64,
+    /// Radial fields only: 0 = straight out/in, 1 = perfectly circular.
+    pub circularity: Option<f64>,
+    /// Radial fields only: true = flowing inward.
+    pub inward: Option<bool>,
+    /// Radial fields only: true = counter-clockwise.
+    pub ccw: Option<bool>,
+    /// Radial fields only: the point the field curls around, as a fraction of
+    /// canvas width / height. Independent of the Orbital structure's center.
+    pub center_frac: Option<(f64, f64)>,
+}
+
+impl FlowInfo {
+    fn new(spec: &FlowFieldSpec, center: Option<(f64, f64)>) -> Self {
+        let center_frac = center.map(|(x, y)| (x / w(1.0), y / h(1.0)));
+        match *spec {
+            FlowFieldSpec::Linear { default_theta } => FlowInfo {
+                linear: true,
+                default_theta,
+                circularity: None,
+                inward: None,
+                ccw: None,
+                center_frac,
+            },
+            FlowFieldSpec::Radial { circularity, direction, rotation, default_theta } => FlowInfo {
+                linear: false,
+                default_theta,
+                circularity: Some(circularity),
+                inward: Some(matches!(direction, Direction::In)),
+                ccw: Some(matches!(rotation, Rotation::Ccw)),
+                center_frac,
+            },
+        }
     }
 }
 
@@ -2191,6 +2395,8 @@ pub struct LayoutSummary {
     /// algorithm's weighted choices): 0.001, 0.002, 0.005, 0.01, 0.03, 0.08,
     /// 0.5 — gated by `color_variety`.
     pub splatter_odds: f64,
+    /// Flow field set-up: linear angle, or radial circularity/direction/center.
+    pub flow: FlowInfo,
 }
 
 /// Number of drawn points (those with positive radius) whose centres fall in
@@ -2276,6 +2482,21 @@ pub fn layout(seed: &[u8; 32], color_db: &ColorDb, config: &Config) -> LayoutSum
         .expect("no deadline => never aborts")
 }
 
+/// Like [`layout_with_deadline`], but also returns `None` as soon as more
+/// than `max_points` points have been placed. The count only ever grows, so
+/// a piece that crosses the cap can never satisfy a "at most N points"
+/// filter — stopping there skips the rest of the layout, which for dense
+/// pieces is most of it.
+pub fn layout_with_limits(
+    seed: &[u8; 32],
+    color_db: &ColorDb,
+    config: &Config,
+    deadline: Option<Instant>,
+    max_points: Option<usize>,
+) -> Option<LayoutSummary> {
+    layout_impl(seed, color_db, config, deadline, max_points)
+}
+
 /// Like [`layout`] but bails out and returns `None` if `deadline` has passed
 /// before the point-placement phase finishes. Use this to bound worst-case
 /// wall time on dense pieces during bulk filtering.
@@ -2284,6 +2505,16 @@ pub fn layout_with_deadline(
     color_db: &ColorDb,
     config: &Config,
     deadline: Option<Instant>,
+) -> Option<LayoutSummary> {
+    layout_impl(seed, color_db, config, deadline, None)
+}
+
+fn layout_impl(
+    seed: &[u8; 32],
+    color_db: &ColorDb,
+    config: &Config,
+    deadline: Option<Instant>,
+    max_points: Option<usize>,
 ) -> Option<LayoutSummary> {
     let traits = Traits::from_seed(seed);
     let mut rng = Rng::from_seed(&seed[..]);
@@ -2295,7 +2526,8 @@ pub fn layout_with_deadline(
     let mut bullseye_generator = BullseyeGenerator::from_traits(&traits, &mut rng);
     let color_scheme = ColorScheme::from_traits(&traits, color_db, &mut rng);
 
-    let flow_field = FlowField::build(&flow_field_spec, &traits, &mut rng);
+    let (flow_field, flow_center) =
+        FlowField::build_with_center(&flow_field_spec, &traits, &mut rng);
     let ignore_flow_field = IgnoreFlowField::build(&flow_field_spec, &mut rng);
     let (start_points, structure_info) =
         StartPointGroups::build_with_info(traits.structure, &mut rng);
@@ -2320,6 +2552,7 @@ pub fn layout_with_deadline(
         &mut colors_used,
         &mut rng,
         deadline,
+        max_points,
     )?;
     let num_points = points.0.len();
     let mut ring_counts_used = BTreeMap::new();
@@ -2344,6 +2577,7 @@ pub fn layout_with_deadline(
         shadows_info,
         curve_length,
         splatter_odds,
+        flow: FlowInfo::new(&flow_field_spec, flow_center),
     })
 }
 
