@@ -583,7 +583,8 @@
 
 			{#if st.orbitalInfo}
 				{@const oi = st.orbitalInfo}
-				{@const cat = (c: number) => ['½', '⅓', 'out', 'far'][c] ?? '?'}
+				{@const posX = (c: number) => ['far ←', 'out ←', '⅓', '½', '⅔', 'out →', 'far →'][c + 3] ?? '?'}
+				{@const posY = (c: number) => ['far ↑', 'out ↑', '⅓', '½', '⅔', 'out ↓', 'far ↓'][c + 3] ?? '?'}
 				<div class="stat-sec">
 					<h4>Orbital structure</h4>
 					<div class="row"><span>Ring bands</span><b>{oi.ringBands}</b></div>
@@ -593,11 +594,11 @@
 					</div>
 					<div class="row">
 						<span>Center X</span>
-						<b>{cat(oi.centerXCategory)} <small class="muted">{oi.centerXFrac.toFixed(3)}</small></b>
+						<b>{posX(oi.centerXPosition)} <small class="muted">{oi.centerXFrac.toFixed(3)}</small></b>
 					</div>
 					<div class="row">
 						<span>Center Y</span>
-						<b>{cat(oi.centerYCategory)} <small class="muted">{oi.centerYFrac.toFixed(3)}</small></b>
+						<b>{posY(oi.centerYPosition)} <small class="muted">{oi.centerYFrac.toFixed(3)}</small></b>
 					</div>
 					<div class="row"><span>Point spacing <small>% canvas</small></span><b>{Math.round(oi.baseStepFrac * 100)}</b></div>
 					<div class="row"><span>Band thickness <small>% canvas</small></span><b>{Math.round(oi.radialGroupStepFrac * 100)}</b></div>

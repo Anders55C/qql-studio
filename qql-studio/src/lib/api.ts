@@ -68,8 +68,9 @@ export type OrbitalInfo = {
 	centerOnCanvas: boolean;
 	centerXFrac: number;
 	centerYFrac: number;
-	centerXCategory: number;
-	centerYCategory: number;
+	/** Fixed position on each axis, -3..3 in canvas order (0 = middle). */
+	centerXPosition: number;
+	centerYPosition: number;
 	baseStepFrac: number;
 	radialGroupStepFrac: number;
 	splitOffsetDeg: number;
@@ -162,8 +163,8 @@ export type CharacteristicFilter = {
 	maxRingBands?: number;
 	allowedOrbitalSplits?: number[];
 	requiredOrbitalSplits?: number[];
-	allowedOrbitalCenterXCategories?: number[];
-	allowedOrbitalCenterYCategories?: number[];
+	allowedOrbitalCenterXPositions?: number[];
+	allowedOrbitalCenterYPositions?: number[];
 	allowedOrbitalBaseStepBp?: number[];
 	allowedOrbitalRadialStepBp?: number[];
 	allowedCurveLengths?: number[];

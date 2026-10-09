@@ -117,11 +117,13 @@ pub struct OrbitalInfoWire {
     pub center_on_canvas: bool,
     pub center_x_frac: f64,
     pub center_y_frac: f64,
-    /// Category indices computed from the raw fractions.
-    /// 0 = centered (1/2), 1 = off-center (1/3, 2/3),
-    /// 2 = just outside (-1/3, 4/3), 3 = way outside (-1.6, 1.6).
-    pub center_x_category: u8,
-    pub center_y_category: u8,
+    /// Which of the algorithm's fixed positions the center sits at on each
+    /// axis, in canvas order: -3 = far before (-1.6), -2 = just outside
+    /// before (-1/3), -1 = first third (1/3), 0 = middle (1/2), 1 = second
+    /// third (2/3), 2 = just outside after (4/3), 3 = far after (1.6).
+    /// "Before" is left (X) or above (Y).
+    pub center_x_position: i8,
+    pub center_y_position: i8,
     /// Point spacing along each ring, as a fraction of canvas width.
     pub base_step_frac: f64,
     /// Ring band thickness as a fraction of canvas width.
@@ -130,18 +132,19 @@ pub struct OrbitalInfoWire {
     pub split_offset_deg: f64,
 }
 
-/// Classify a center axis fraction into the four UX categories.
-fn classify_center_axis(frac: f64) -> u8 {
-    let eps = 0.02;
-    if (frac - 0.5).abs() < eps {
-        0
-    } else if (frac - (1.0 / 3.0)).abs() < eps || (frac - (2.0 / 3.0)).abs() < eps {
-        1
-    } else if (frac + (1.0 / 3.0)).abs() < eps || (frac - (4.0 / 3.0)).abs() < eps {
-        2
-    } else {
-        3
-    }
+/// The fixed Orbital center positions on one axis (fractions of the canvas),
+/// in canvas order; index 3 is the middle. See `orbital()` in qqlrs layouts.rs.
+const ORBITAL_CENTER_POSITIONS: [f64; 7] = [-1.6, -0.333, 0.333, 0.5, 0.666, 1.333, 1.6];
+
+/// Position code (-3..=3) of the fixed Orbital center nearest to `frac`.
+fn classify_center_position(frac: f64) -> i8 {
+    let (idx, _) = ORBITAL_CENTER_POSITIONS
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i, (frac - p).abs()))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("non-empty");
+    idx as i8 - 3
 }
 
 #[derive(Serialize, Clone, Debug, Copy)]
@@ -180,8 +183,8 @@ impl From<qql::layouts::OrbitalInfo> for OrbitalInfoWire {
             center_on_canvas: i.center_on_canvas,
             center_x_frac: i.center_x_frac,
             center_y_frac: i.center_y_frac,
-            center_x_category: classify_center_axis(i.center_x_frac),
-            center_y_category: classify_center_axis(i.center_y_frac),
+            center_x_position: classify_center_position(i.center_x_frac),
+            center_y_position: classify_center_position(i.center_y_frac),
             base_step_frac: i.base_step_frac,
             radial_group_step_frac: i.radial_group_step_frac,
             split_offset_deg,

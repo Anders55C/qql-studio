@@ -127,10 +127,10 @@ pub struct CharacteristicFilter {
     /// If non-empty: each listed split value must appear in at least one band.
     /// Empty / None = no constraint.
     pub required_orbital_splits: Option<Vec<u32>>,
-    /// Allowed center-X position categories (0=centered, 1=off-center,
-    /// 2=just outside, 3=way outside). Empty / None = no constraint.
-    pub allowed_orbital_center_x_categories: Option<Vec<u8>>,
-    pub allowed_orbital_center_y_categories: Option<Vec<u8>>,
+    /// Allowed Orbital center positions per axis, as position codes -3..=3
+    /// (see `OrbitalInfoWire::center_x_position`). Empty / None = any.
+    pub allowed_orbital_center_x_positions: Option<Vec<i8>>,
+    pub allowed_orbital_center_y_positions: Option<Vec<i8>>,
     /// Allowed point spacings (`base_step`) as basis points of canvas width:
     /// e.g. 100 = 1%, 1600 = 16%. Empty / None = no constraint.
     pub allowed_orbital_base_step_bp: Option<Vec<u32>>,
@@ -236,12 +236,12 @@ impl CharacteristicFilter {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
             || self
-                .allowed_orbital_center_x_categories
+                .allowed_orbital_center_x_positions
                 .as_ref()
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
             || self
-                .allowed_orbital_center_y_categories
+                .allowed_orbital_center_y_positions
                 .as_ref()
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
@@ -462,7 +462,6 @@ impl CharacteristicFilter {
     }
 
     fn matches_structure(&self, stats: &StructureStats) -> bool {
-        let non_empty = |v: &Option<Vec<u8>>| v.as_ref().map(|x| !x.is_empty()).unwrap_or(false);
         let non_empty_u32 =
             |v: &Option<Vec<u32>>| v.as_ref().map(|x| !x.is_empty()).unwrap_or(false);
         // Compare a fraction against an allowed basis-points set with rounding
@@ -529,8 +528,8 @@ impl CharacteristicFilter {
             || self.max_ring_bands.is_some()
             || non_empty_u32(&self.allowed_orbital_splits)
             || non_empty_u32(&self.required_orbital_splits)
-            || non_empty(&self.allowed_orbital_center_x_categories)
-            || non_empty(&self.allowed_orbital_center_y_categories)
+            || self.allowed_orbital_center_x_positions.as_ref().is_some_and(|v| !v.is_empty())
+            || self.allowed_orbital_center_y_positions.as_ref().is_some_and(|v| !v.is_empty())
             || non_empty_u32(&self.allowed_orbital_base_step_bp)
             || non_empty_u32(&self.allowed_orbital_radial_step_bp)
             || self.min_split_offset_deg.is_some()
@@ -560,13 +559,13 @@ impl CharacteristicFilter {
                     }
                 }
             }
-            if let Some(allowed) = self.allowed_orbital_center_x_categories.as_ref() {
-                if !allowed.is_empty() && !allowed.contains(&info.center_x_category) {
+            if let Some(allowed) = self.allowed_orbital_center_x_positions.as_ref() {
+                if !allowed.is_empty() && !allowed.contains(&info.center_x_position) {
                     return false;
                 }
             }
-            if let Some(allowed) = self.allowed_orbital_center_y_categories.as_ref() {
-                if !allowed.is_empty() && !allowed.contains(&info.center_y_category) {
+            if let Some(allowed) = self.allowed_orbital_center_y_positions.as_ref() {
+                if !allowed.is_empty() && !allowed.contains(&info.center_y_position) {
                     return false;
                 }
             }
@@ -1720,6 +1719,49 @@ mod tests {
         names.sort();
         assert_eq!(names, ["frame_0001.png", "frame_0002.png", "notes.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orbital_center_filter_picks_a_side() {
+        // Lower third on Y (code 1), and just off the left edge on X (code -2).
+        let filter = CharacteristicFilter {
+            allowed_orbital_center_x_positions: Some(vec![-2]),
+            allowed_orbital_center_y_positions: Some(vec![1]),
+            ..Default::default()
+        };
+        assert!(filter.structure_active() && !filter.points_active());
+        let mut choices = TraitChoices::default();
+        choices.structure = Some("Orbital".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 12,
+            max_attempts: Some(20_000),
+            run_layout: false,
+            characteristic_filter: Some(filter),
+            rng_seed: Some(11),
+            workers: Some(4),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            layout_timeout_ms: None,
+        };
+        let outcome = generate_candidates_inner(req, |_| {}).unwrap();
+        assert_eq!(outcome.candidates.len(), 12);
+        for c in &outcome.candidates {
+            let bytes: [u8; 32] = hex::decode(c.seed.trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let oi = render::layout_only(&bytes).orbital_info.unwrap();
+            assert!((oi.center_x_frac + 0.333).abs() < 1e-6, "{} x={}", c.seed, oi.center_x_frac);
+            assert!((oi.center_y_frac - 0.666).abs() < 1e-6, "{} y={}", c.seed, oi.center_y_frac);
+            assert_eq!((oi.center_x_position, oi.center_y_position), (-2, 1));
+        }
     }
 
     #[test]

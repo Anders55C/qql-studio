@@ -291,8 +291,8 @@
 				'maxRingBands',
 				'allowedOrbitalSplits',
 				'requiredOrbitalSplits',
-				'allowedOrbitalCenterXCategories',
-				'allowedOrbitalCenterYCategories',
+				'allowedOrbitalCenterXPositions',
+				'allowedOrbitalCenterYPositions',
 				'allowedOrbitalBaseStepBp',
 				'allowedOrbitalRadialStepBp',
 				'minSplitOffsetDeg',
@@ -342,15 +342,21 @@
 	let requireOrbitalSplit1 = $state<boolean>(false);
 	let requireOrbitalSplit2 = $state<boolean>(false);
 	let requireOrbitalSplit3 = $state<boolean>(false);
-	// Center X category checkboxes (0=Centered, 1=Off-center, 2=Just outside, 3=Way outside).
-	let cxCentered = $state<boolean>(false);
-	let cxOffCenter = $state<boolean>(false);
-	let cxJustOutside = $state<boolean>(false);
-	let cxWayOutside = $state<boolean>(false);
-	let cyCentered = $state<boolean>(false);
-	let cyOffCenter = $state<boolean>(false);
-	let cyJustOutside = $state<boolean>(false);
-	let cyWayOutside = $state<boolean>(false);
+	// Orbital center: allowed fixed positions per axis, as codes -3..3 in
+	// canvas order (see ORBITAL_CENTER_POSITIONS below).
+	let orbitalCenterX = $state<number[]>([]);
+	let orbitalCenterY = $state<number[]>([]);
+	const ORBITAL_CENTER_POSITIONS = [
+		{ code: -3, label: 'far', x: 'way off the left edge (−160%)', y: 'way above the top (−160%)' },
+		{ code: -2, label: 'out', x: 'just off the left edge (−33%)', y: 'just above the top (−33%)' },
+		{ code: -1, label: '⅓', x: 'left third (33%)', y: 'upper third (33% down)' },
+		{ code: 0, label: '½', x: 'centre (50%)', y: 'centre (50%)' },
+		{ code: 1, label: '⅔', x: 'right third (67%)', y: 'lower third (67% down)' },
+		{ code: 2, label: 'out', x: 'just off the right edge (133%)', y: 'just below the bottom (133%)' },
+		{ code: 3, label: 'far', x: 'way off the right edge (160%)', y: 'way below the bottom (160%)' }
+	];
+	const togglePos = (list: number[], code: number) =>
+		list.includes(code) ? list.filter((c) => c !== code) : [...list, code];
 	// Point spacing checkboxes (basis points of canvas width).
 	let bs1 = $state<boolean>(false); // 1%
 	let bs2 = $state<boolean>(false); // 2%
@@ -628,24 +634,8 @@
 				].filter((v): v is number => v !== null);
 				return list.length > 0 ? list : undefined;
 			})(),
-			allowedOrbitalCenterXCategories: (() => {
-				const list = [
-					cxCentered ? 0 : null,
-					cxOffCenter ? 1 : null,
-					cxJustOutside ? 2 : null,
-					cxWayOutside ? 3 : null
-				].filter((v): v is number => v !== null);
-				return list.length > 0 ? list : undefined;
-			})(),
-			allowedOrbitalCenterYCategories: (() => {
-				const list = [
-					cyCentered ? 0 : null,
-					cyOffCenter ? 1 : null,
-					cyJustOutside ? 2 : null,
-					cyWayOutside ? 3 : null
-				].filter((v): v is number => v !== null);
-				return list.length > 0 ? list : undefined;
-			})(),
+			allowedOrbitalCenterXPositions: orbitalCenterX.length > 0 ? orbitalCenterX : undefined,
+			allowedOrbitalCenterYPositions: orbitalCenterY.length > 0 ? orbitalCenterY : undefined,
 			allowedOrbitalBaseStepBp: (() => {
 				const list = [
 					bs1 ? 100 : null,
@@ -725,8 +715,8 @@
 			charFilter.maxRingBands = undefined;
 			charFilter.allowedOrbitalSplits = undefined;
 			charFilter.requiredOrbitalSplits = undefined;
-			charFilter.allowedOrbitalCenterXCategories = undefined;
-			charFilter.allowedOrbitalCenterYCategories = undefined;
+			charFilter.allowedOrbitalCenterXPositions = undefined;
+			charFilter.allowedOrbitalCenterYPositions = undefined;
 			charFilter.allowedOrbitalBaseStepBp = undefined;
 			charFilter.allowedOrbitalRadialStepBp = undefined;
 			charFilter.minSplitOffsetDeg = undefined;
@@ -1607,54 +1597,33 @@
 					</label>
 				</div>
 			</div>
-			<div class="splits-row">
-				<div class="splits-label">
-					<strong>Center X{@render orbitalCenterInfo()}</strong>
-					<small>horizontal position categories</small>
+			{#each [{ axis: 'x', name: 'Center X', before: '← off left', after: 'off right →' }, { axis: 'y', name: 'Center Y', before: '↑ above', after: 'below ↓' }] as ax (ax.axis)}
+				{@const picked = ax.axis === 'x' ? orbitalCenterX : orbitalCenterY}
+				<div class="center-pos">
+					<div class="splits-label">
+						<strong>{ax.name}{@render orbitalCenterInfo()}</strong>
+						<small>where the rings radiate from</small>
+					</div>
+					<div class="center-pos-grid">
+						{#each ORBITAL_CENTER_POSITIONS as p (p.code)}
+							<label class="center-pos-cell" class:onCanvas={Math.abs(p.code) <= 1} title={ax.axis === 'x' ? p.x : p.y}>
+								<input
+									type="checkbox"
+									checked={picked.includes(p.code)}
+									onchange={() => {
+										if (ax.axis === 'x') orbitalCenterX = togglePos(orbitalCenterX, p.code);
+										else orbitalCenterY = togglePos(orbitalCenterY, p.code);
+									}}
+								/>
+								<span>{p.label}</span>
+							</label>
+						{/each}
+					</div>
+					<div class="center-pos-legend">
+						<span>{ax.before}</span><span>canvas</span><span>{ax.after}</span>
+					</div>
 				</div>
-				<div class="splits-checks">
-					<label class="splits-check" title="x = 1/2">
-						<input type="checkbox" bind:checked={cxCentered} />
-						<span>½</span>
-					</label>
-					<label class="splits-check" title="x = 1/3 or 2/3">
-						<input type="checkbox" bind:checked={cxOffCenter} />
-						<span>⅓</span>
-					</label>
-					<label class="splits-check" title="x = -1/3 or 4/3">
-						<input type="checkbox" bind:checked={cxJustOutside} />
-						<span>out</span>
-					</label>
-					<label class="splits-check" title="x = -1.6 or 1.6">
-						<input type="checkbox" bind:checked={cxWayOutside} />
-						<span>far</span>
-					</label>
-				</div>
-			</div>
-			<div class="splits-row">
-				<div class="splits-label">
-					<strong>Center Y{@render orbitalCenterInfo()}</strong>
-					<small>vertical position categories</small>
-				</div>
-				<div class="splits-checks">
-					<label class="splits-check" title="y = 1/2">
-						<input type="checkbox" bind:checked={cyCentered} />
-						<span>½</span>
-					</label>
-					<label class="splits-check" title="y = 1/3 or 2/3">
-						<input type="checkbox" bind:checked={cyOffCenter} />
-						<span>⅓</span>
-					</label>
-					<label class="splits-check" title="y = -1/3 or 4/3">
-						<input type="checkbox" bind:checked={cyJustOutside} />
-						<span>out</span>
-					</label>
-					<label class="splits-check" title="y = -1.6 or 1.6">
-						<input type="checkbox" bind:checked={cyWayOutside} />
-						<span>far</span>
-					</label>
-				</div>
-			</div>
+			{/each}
 			<div class="splits-row">
 				<div class="splits-label">
 					<strong>Point spacing{@render orbitalSpacingInfo()}</strong>
@@ -2227,12 +2196,18 @@
 			<strong>Where the rings radiate from.</strong> Each axis is picked from a handful of
 			fixed positions:
 		</p>
+		<p>The boxes run in canvas order, left to right (X) or top to bottom (Y):</p>
 		<ul>
+			<li><strong>far</strong> — well outside, about 1.6 canvases away (off the left / top, or the right / bottom)</li>
+			<li><strong>out</strong> — just past the edge, a third of a canvas outside</li>
+			<li><strong>⅓ / ⅔</strong> — on the third lines (33% or 67%)</li>
 			<li><strong>½</strong> — dead centre on that axis</li>
-			<li><strong>⅓</strong> — a third of the way in, from either side</li>
-			<li><strong>out</strong> — just past the canvas edge</li>
-			<li><strong>far</strong> — well outside, about 1.6× the canvas away</li>
 		</ul>
+		<p>
+			Each side is its own box, so you can pick exactly where the rings come from. For
+			example X <strong>out →</strong> with Y <strong>out ↓</strong> gives rings sweeping in
+			from the bottom-right corner. Hover a box for its exact position.
+		</p>
 		<p>
 			Both axes centred gives a symmetric bullseye. Push one axis off-canvas and you get
 			giant arcs sweeping in from that side with no visible centre at all — a completely
@@ -2637,6 +2612,45 @@
 	.splits-label small {
 		font-size: 10px;
 		color: #666;
+	}
+	.center-pos {
+		margin: 6px 0 4px;
+	}
+	.center-pos-grid {
+		display: grid;
+		grid-template-columns: repeat(7, 1fr);
+		margin-top: 4px;
+		border-radius: 4px;
+		background: linear-gradient(
+			90deg,
+			transparent 28.57%,
+			rgba(255, 255, 255, 0.05) 28.57%,
+			rgba(255, 255, 255, 0.05) 71.43%,
+			transparent 71.43%
+		);
+	}
+	.center-pos-cell {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
+		padding: 3px 0;
+		font-size: 12px;
+		color: #999;
+		cursor: pointer;
+	}
+	.center-pos-cell.onCanvas {
+		color: #ddd;
+	}
+	.center-pos-cell input {
+		margin: 0;
+	}
+	.center-pos-legend {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		color: #666;
+		margin-top: 1px;
 	}
 	.splits-checks {
 		display: flex;
