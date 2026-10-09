@@ -222,6 +222,7 @@ export type GenerateOutcome = {
 };
 
 export const listTraits = () => invoke<TraitMeta[]>('list_traits');
+export const sessionId = () => invoke<string>('session_id');
 export const listPaletteColors = () =>
 	invoke<PaletteColors[]>('list_palette_colors');
 export const decodeSeed = (seedHex: string) =>

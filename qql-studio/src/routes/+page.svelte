@@ -9,6 +9,7 @@
 		generateCandidates,
 		layoutSummary,
 		listPaletteColors,
+		sessionId,
 		listTraits,
 		saveSeedPng,
 		type Candidate,
@@ -24,7 +25,7 @@
 	import Tile from '$lib/Tile.svelte';
 	import FilterInfo from '$lib/FilterInfo.svelte';
 	import Detail from '$lib/Detail.svelte';
-	import { setRenderConcurrency } from '$lib/renderQueue';
+	import { dropQueuedRenders, setRenderConcurrency } from '$lib/renderQueue';
 
 	const LS_KEY = 'qql-studio.v1';
 
@@ -128,6 +129,15 @@
 		return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 	});
 
+	// Same for ring colors: picks the pinned palette doesn't have are dropped
+	// (their chips are hidden, so they'd be invisible and still reject seeds).
+	$effect(() => {
+		const reachable = new Set(visiblePrimaries.map((c) => c.name));
+		if (paletteColors.length && ringColors.some((c) => !reachable.has(c))) {
+			ringColors = ringColors.filter((c) => reachable.has(c));
+		}
+	});
+
 	function toggleRingColor(name: string) {
 		if (ringColors.includes(name)) {
 			ringColors = ringColors.filter((c) => c !== name);
@@ -212,8 +222,11 @@
 	// Provably-impossible filter combinations, surfaced inline and blocked at
 	// Generate. Only deterministic impossibilities go here (not merely-rare ones).
 	// (Called from onGenerate, so it may reference filter state declared below.)
-	function impossibleReasons(): string[] {
+	function impossibleReasons(cf: CharacteristicFilter): string[] {
 		const reasons: string[] = [];
+		if (count == null || !Number.isFinite(count) || count < 1) {
+			reasons.push('Count: enter how many seeds to find (1 or more).');
+		}
 		if (chunksImpossible) {
 			reasons.push(
 				`Actual chunks: minimum is ${minFormationChunks}, but with Horizontal ≤ ${maxHorizontalSections ?? 7} and Vertical ≤ ${maxVerticalSections ?? 7}, the most chunks a Formation can have is ${maxAchievableChunks}. Lower the minimum, or raise the section limits.`
@@ -237,9 +250,87 @@
 			[minShadowsActualCircles, maxShadowsActualCircles, 'Actual circles', shadowsEnabled]
 		];
 		for (const [min, max, label, applies] of minMaxPairs) {
-			if (applies && min != null && max != null && min > max) {
+			if (applies && ((min != null && min < 0) || (max != null && max < 0))) {
+				reasons.push(`${label}: values can't be negative.`);
+			} else if (applies && min != null && max != null && min > max) {
 				reasons.push(`${label}: minimum (${min}) is greater than maximum (${max}).`);
 			}
+		}
+
+		// Flow angle needs a linear flow; Spiral center needs a radial one.
+		const angleOn = angleApplies && (minAngle > 0 || maxAngle < 90);
+		if (angleOn && centerActive) {
+			reasons.push(
+				'Flow angle and Spiral center are both set, but the angle only exists on linear flows and the center only on radial ones, so no seed can match both. Clear one, or pin a Flow field.'
+			);
+		}
+		// A Horizontal/Diagonal/Vertical flow has exactly one angle.
+		if (angleOn && fixedAngle !== undefined && (fixedAngle < minAngle || fixedAngle > maxAngle)) {
+			reasons.push(
+				`Flow angle: ${choices.flowField} is always ${fixedAngle}°, which is outside ${minAngle}°–${maxAngle}°. Widen the range or use RandomLinear.`
+			);
+		}
+
+		// With Structure = Any, settings on two structure cards can never both
+		// apply: a seed has exactly one structure.
+		const has = (...keys: (keyof CharacteristicFilter)[]) =>
+			keys.some((k) => cf[k] !== undefined && cf[k] !== null);
+		const cardsSet = [
+			has(
+				'minHorizontalSections',
+				'maxHorizontalSections',
+				'minVerticalSections',
+				'maxVerticalSections',
+				'allowedFormationStepBp',
+				'allowedFormationSkipBp',
+				'minFormationChunks',
+				'maxFormationChunks'
+			) && 'Formation',
+			has(
+				'minRingBands',
+				'maxRingBands',
+				'allowedOrbitalSplits',
+				'requiredOrbitalSplits',
+				'allowedOrbitalCenterXCategories',
+				'allowedOrbitalCenterYCategories',
+				'allowedOrbitalBaseStepBp',
+				'allowedOrbitalRadialStepBp',
+				'minSplitOffsetDeg',
+				'maxSplitOffsetDeg'
+			) && 'Orbital',
+			has(
+				'allowedShadowsNumCircles',
+				'shadowsFillStyle',
+				'minShadowsActualCircles',
+				'maxShadowsActualCircles',
+				'shadowsColumnarSquare',
+				'shadowsOutwardRadial'
+			) && 'Shadows'
+		].filter(Boolean);
+		if (cardsSet.length > 1) {
+			reasons.push(
+				`Settings on the ${cardsSet.join(' and ')} cards can't all apply: a seed has only one structure. Clear all but one card, or pin a Structure.`
+			);
+		}
+
+		// Every required split must also be allowed.
+		const allowed = cf.allowedOrbitalSplits;
+		const missing = (cf.requiredOrbitalSplits ?? []).filter((r) => allowed && !allowed.includes(r));
+		if (allowed && missing.length > 0) {
+			reasons.push(
+				`Orbital splits: ${missing.join(', ')} is required but not allowed. Tick it under Allowed splits too.`
+			);
+		}
+
+		// Splatter odds come from Color variety: Low tops out at 0.005 and
+		// Medium at 0.03 (see qqlrs-main art.rs splatter table).
+		const variety = choices.colorVariety;
+		const maxOdds = variety === 'Low' ? 0.005 : variety === 'Medium' ? 0.03 : undefined;
+		const presetMin = splatterMode === 'moderate' ? 0.01 : splatterMode === 'heavy' ? 0.08 : undefined;
+		if (maxOdds !== undefined && presetMin !== undefined && presetMin > maxOdds) {
+			reasons.push(
+				`Splatter: ${splatterMode === 'heavy' ? 'Heavy+' : 'Moderate+'} can't happen with Color variety ${variety}. Pick a lighter preset or a higher variety.`
+			);
 		}
 		return reasons;
 	}
@@ -386,6 +477,50 @@
 		unlisten = await listen<GenerateProgress>('search-progress', (event) => {
 			progress = event.payload;
 		});
+		await restoreAfterReload();
+	});
+
+	// ---- Survive a webview reload ------------------------------------------
+	// WebKit kills and silently reloads the page when it uses too much memory
+	// while hidden (e.g. lots of tiles, laptop asleep). The app itself keeps
+	// running, so we save the results tagged with the app's session id and put
+	// them back if the page comes up again within the same session. A fresh
+	// launch has a new id and starts empty as before.
+	const RESULTS_KEY = 'qql-studio.results.v1';
+	let appSession = $state<string | null>(null);
+
+	async function restoreAfterReload() {
+		try {
+			const id = await sessionId();
+			// Read before setting appSession, which lets the save effect run.
+			const raw = localStorage.getItem(RESULTS_KEY);
+			appSession = id;
+			if (!raw || results.length > 0) return;
+			const snap = JSON.parse(raw);
+			if (snap.session !== appSession || !Array.isArray(snap.results)) return;
+			if (snap.results.length === 0) return;
+			results = snap.results;
+			favorites = new Set(Array.isArray(snap.favorites) ? snap.favorites : []);
+			statusMsg = `Restored ${results.length} results after the view reloaded (it can run out of memory while hidden).`;
+			renderRunStart = performance.now();
+		} catch {}
+	}
+
+	$effect(() => {
+		if (!appSession || busy) return;
+		const snap = { session: appSession, results, favorites: [...favorites] };
+		try {
+			localStorage.setItem(RESULTS_KEY, JSON.stringify(snap));
+		} catch {
+			// Over the storage quota: keep seeds and traits, drop the stats.
+			try {
+				const lean = { ...snap, results: results.map((r) => ({ ...r, stats: null })) };
+				localStorage.setItem(RESULTS_KEY, JSON.stringify(lean));
+			} catch {
+				// Never leave an older snapshot behind to be restored by mistake.
+				localStorage.removeItem(RESULTS_KEY);
+			}
+		}
 	});
 
 	onDestroy(() => {
@@ -427,191 +562,207 @@
 		return traitsMeta.find((m) => m.name === name)?.options ?? [];
 	}
 
+	// Whole, non-negative number for a count field, or undefined when empty.
+	// Number inputs can hold decimals (and negatives are caught by
+	// impossibleReasons); the backend expects unsigned integers.
+	function whole(v: number | null | undefined): number | undefined {
+		return v == null || !Number.isFinite(v) ? undefined : Math.max(0, Math.floor(v));
+	}
+
+	// The characteristic filter as sent to the backend: empty controls become
+	// undefined, and cards that don't apply to the chosen Structure are dropped.
+	function buildCharFilter(): CharacteristicFilter {
+		const charFilter: CharacteristicFilter = {
+			minPoints: whole(minPoints),
+			maxPoints: whole(maxPoints),
+			minColors: whole(minColors),
+			maxColors: whole(maxColors),
+			minSmall: whole(minSmall),
+			maxSmall: whole(maxSmall),
+			minMedium: whole(minMedium),
+			maxMedium: whole(maxMedium),
+			minLarge: whole(minLarge),
+			maxLarge: whole(maxLarge),
+			cornerConcentration: cornerConcentration || undefined,
+			cornerRatio: cornerConcentration ? cornerRatio : undefined,
+			minHorizontalSections: whole(minHorizontalSections),
+			maxHorizontalSections: whole(maxHorizontalSections),
+			minVerticalSections: whole(minVerticalSections),
+			maxVerticalSections: whole(maxVerticalSections),
+			allowedFormationStepBp: (() => {
+				const list = [
+					fStep75 ? 75 : null,
+					fStep100 ? 100 : null,
+					fStep200 ? 200 : null,
+					fStep400 ? 400 : null,
+					fStep800 ? 800 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedFormationSkipBp: (() => {
+				const list = [
+					fSkip0 ? 0 : null,
+					fSkip10 ? 1000 : null,
+					fSkip20 ? 2000 : null,
+					fSkip50 ? 5000 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			minFormationChunks: whole(minFormationChunks),
+			maxFormationChunks: whole(maxFormationChunks),
+			minRingBands: whole(minRingBands),
+			maxRingBands: whole(maxRingBands),
+			allowedOrbitalSplits: (() => {
+				const list = [
+					allowOrbitalSplit1 ? 1 : null,
+					allowOrbitalSplit2 ? 2 : null,
+					allowOrbitalSplit3 ? 3 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			requiredOrbitalSplits: (() => {
+				const list = [
+					requireOrbitalSplit1 ? 1 : null,
+					requireOrbitalSplit2 ? 2 : null,
+					requireOrbitalSplit3 ? 3 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedOrbitalCenterXCategories: (() => {
+				const list = [
+					cxCentered ? 0 : null,
+					cxOffCenter ? 1 : null,
+					cxJustOutside ? 2 : null,
+					cxWayOutside ? 3 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedOrbitalCenterYCategories: (() => {
+				const list = [
+					cyCentered ? 0 : null,
+					cyOffCenter ? 1 : null,
+					cyJustOutside ? 2 : null,
+					cyWayOutside ? 3 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedOrbitalBaseStepBp: (() => {
+				const list = [
+					bs1 ? 100 : null,
+					bs2 ? 200 : null,
+					bs4 ? 400 : null,
+					bs6 ? 600 : null,
+					bs8 ? 800 : null,
+					bs16 ? 1600 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedOrbitalRadialStepBp: (() => {
+				const list = [
+					rs7 ? 700 : null,
+					rs15 ? 1500 : null,
+					rs30 ? 3000 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			allowedCurveLengths: (() => {
+				const list = [
+					cl500 ? 500 : null,
+					cl650 ? 650 : null,
+					cl850 ? 850 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			minSplitOffsetDeg: minSplitOffsetDeg ?? undefined,
+			maxSplitOffsetDeg: maxSplitOffsetDeg ?? undefined,
+			backgroundColors: backgroundColors.length > 0 ? backgroundColors : undefined,
+			ringColors: ringColors.length > 0 ? ringColors : undefined,
+			exactRingColors: ringColors.length > 0 ? exactRingColors : undefined,
+			splatterMode: splatterMode || undefined,
+			minSplatterOdds: minSplatterOdds ?? undefined,
+			maxSplatterOdds: maxSplatterOdds ?? undefined,
+			allowedShadowsNumCircles: (() => {
+				const list = [
+					sc5 ? 5 : null,
+					sc7 ? 7 : null,
+					sc10 ? 10 : null,
+					sc20 ? 20 : null,
+					sc30 ? 30 : null,
+					sc60 ? 60 : null
+				].filter((v): v is number => v !== null);
+				return list.length > 0 ? list : undefined;
+			})(),
+			shadowsFillStyle: shadowsFillStyle || undefined,
+			minShadowsActualCircles: whole(minShadowsActualCircles),
+			maxShadowsActualCircles: whole(maxShadowsActualCircles),
+			shadowsColumnarSquare:
+				shadowsColumnar === 'col'
+					? true
+					: shadowsColumnar === 'row'
+						? false
+						: undefined,
+			shadowsOutwardRadial:
+				shadowsRadialDir === 'out'
+					? true
+					: shadowsRadialDir === 'in'
+						? false
+						: undefined
+		};
+		// Drop filters for structure sections that don't apply to the chosen
+		// Structure, so a greyed-out (or stale) value can't force zero results.
+		if (!formationEnabled) {
+			charFilter.minHorizontalSections = undefined;
+			charFilter.maxHorizontalSections = undefined;
+			charFilter.minVerticalSections = undefined;
+			charFilter.maxVerticalSections = undefined;
+			charFilter.allowedFormationStepBp = undefined;
+			charFilter.allowedFormationSkipBp = undefined;
+			charFilter.minFormationChunks = undefined;
+			charFilter.maxFormationChunks = undefined;
+		}
+		if (!orbitalEnabled) {
+			charFilter.minRingBands = undefined;
+			charFilter.maxRingBands = undefined;
+			charFilter.allowedOrbitalSplits = undefined;
+			charFilter.requiredOrbitalSplits = undefined;
+			charFilter.allowedOrbitalCenterXCategories = undefined;
+			charFilter.allowedOrbitalCenterYCategories = undefined;
+			charFilter.allowedOrbitalBaseStepBp = undefined;
+			charFilter.allowedOrbitalRadialStepBp = undefined;
+			charFilter.minSplitOffsetDeg = undefined;
+			charFilter.maxSplitOffsetDeg = undefined;
+		}
+		if (!shadowsEnabled) {
+			charFilter.allowedShadowsNumCircles = undefined;
+			charFilter.shadowsFillStyle = undefined;
+			charFilter.minShadowsActualCircles = undefined;
+			charFilter.maxShadowsActualCircles = undefined;
+			charFilter.shadowsColumnarSquare = undefined;
+			charFilter.shadowsOutwardRadial = undefined;
+		}
+		return charFilter;
+	}
+
 	async function onGenerate() {
 		error = null;
 		statusMsg = '';
+		const cf = buildCharFilter();
 		// Bail before churning attempts on a provably-impossible combination.
-		const reasons = impossibleReasons();
+		const reasons = impossibleReasons(cf);
 		if (reasons.length > 0) {
 			error = `This combination can't produce results:\n• ${reasons.join('\n• ')}`;
 			return;
 		}
 		progress = null;
 		results = [];
+		dropQueuedRenders();
 		renderedCount = 0;
 		renderRunStart = null;
 		renderRunDuration = null;
 		cancelling = false;
 		busy = true;
 		try {
-			const charFilter: CharacteristicFilter = {
-				minPoints: minPoints ?? undefined,
-				maxPoints: maxPoints ?? undefined,
-				minColors: minColors ?? undefined,
-				maxColors: maxColors ?? undefined,
-				minSmall: minSmall ?? undefined,
-				maxSmall: maxSmall ?? undefined,
-				minMedium: minMedium ?? undefined,
-				maxMedium: maxMedium ?? undefined,
-				minLarge: minLarge ?? undefined,
-				maxLarge: maxLarge ?? undefined,
-				cornerConcentration: cornerConcentration || undefined,
-				cornerRatio: cornerConcentration ? cornerRatio : undefined,
-				minHorizontalSections: minHorizontalSections ?? undefined,
-				maxHorizontalSections: maxHorizontalSections ?? undefined,
-				minVerticalSections: minVerticalSections ?? undefined,
-				maxVerticalSections: maxVerticalSections ?? undefined,
-				allowedFormationStepBp: (() => {
-					const list = [
-						fStep75 ? 75 : null,
-						fStep100 ? 100 : null,
-						fStep200 ? 200 : null,
-						fStep400 ? 400 : null,
-						fStep800 ? 800 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedFormationSkipBp: (() => {
-					const list = [
-						fSkip0 ? 0 : null,
-						fSkip10 ? 1000 : null,
-						fSkip20 ? 2000 : null,
-						fSkip50 ? 5000 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				minFormationChunks: minFormationChunks ?? undefined,
-				maxFormationChunks: maxFormationChunks ?? undefined,
-				minRingBands: minRingBands ?? undefined,
-				maxRingBands: maxRingBands ?? undefined,
-				allowedOrbitalSplits: (() => {
-					const list = [
-						allowOrbitalSplit1 ? 1 : null,
-						allowOrbitalSplit2 ? 2 : null,
-						allowOrbitalSplit3 ? 3 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				requiredOrbitalSplits: (() => {
-					const list = [
-						requireOrbitalSplit1 ? 1 : null,
-						requireOrbitalSplit2 ? 2 : null,
-						requireOrbitalSplit3 ? 3 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedOrbitalCenterXCategories: (() => {
-					const list = [
-						cxCentered ? 0 : null,
-						cxOffCenter ? 1 : null,
-						cxJustOutside ? 2 : null,
-						cxWayOutside ? 3 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedOrbitalCenterYCategories: (() => {
-					const list = [
-						cyCentered ? 0 : null,
-						cyOffCenter ? 1 : null,
-						cyJustOutside ? 2 : null,
-						cyWayOutside ? 3 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedOrbitalBaseStepBp: (() => {
-					const list = [
-						bs1 ? 100 : null,
-						bs2 ? 200 : null,
-						bs4 ? 400 : null,
-						bs6 ? 600 : null,
-						bs8 ? 800 : null,
-						bs16 ? 1600 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedOrbitalRadialStepBp: (() => {
-					const list = [
-						rs7 ? 700 : null,
-						rs15 ? 1500 : null,
-						rs30 ? 3000 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				allowedCurveLengths: (() => {
-					const list = [
-						cl500 ? 500 : null,
-						cl650 ? 650 : null,
-						cl850 ? 850 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				minSplitOffsetDeg: minSplitOffsetDeg ?? undefined,
-				maxSplitOffsetDeg: maxSplitOffsetDeg ?? undefined,
-				backgroundColors: backgroundColors.length > 0 ? backgroundColors : undefined,
-				ringColors: ringColors.length > 0 ? ringColors : undefined,
-				exactRingColors: ringColors.length > 0 ? exactRingColors : undefined,
-				splatterMode: splatterMode || undefined,
-				minSplatterOdds: minSplatterOdds ?? undefined,
-				maxSplatterOdds: maxSplatterOdds ?? undefined,
-				allowedShadowsNumCircles: (() => {
-					const list = [
-						sc5 ? 5 : null,
-						sc7 ? 7 : null,
-						sc10 ? 10 : null,
-						sc20 ? 20 : null,
-						sc30 ? 30 : null,
-						sc60 ? 60 : null
-					].filter((v): v is number => v !== null);
-					return list.length > 0 ? list : undefined;
-				})(),
-				shadowsFillStyle: shadowsFillStyle || undefined,
-				minShadowsActualCircles: minShadowsActualCircles ?? undefined,
-				maxShadowsActualCircles: maxShadowsActualCircles ?? undefined,
-				shadowsColumnarSquare:
-					shadowsColumnar === 'col'
-						? true
-						: shadowsColumnar === 'row'
-							? false
-							: undefined,
-				shadowsOutwardRadial:
-					shadowsRadialDir === 'out'
-						? true
-						: shadowsRadialDir === 'in'
-							? false
-							: undefined
-			};
-			// Drop filters for structure sections that don't apply to the chosen
-			// Structure, so a greyed-out (or stale) value can't force zero results.
-			if (!formationEnabled) {
-				charFilter.minHorizontalSections = undefined;
-				charFilter.maxHorizontalSections = undefined;
-				charFilter.minVerticalSections = undefined;
-				charFilter.maxVerticalSections = undefined;
-				charFilter.allowedFormationStepBp = undefined;
-				charFilter.allowedFormationSkipBp = undefined;
-				charFilter.minFormationChunks = undefined;
-				charFilter.maxFormationChunks = undefined;
-			}
-			if (!orbitalEnabled) {
-				charFilter.minRingBands = undefined;
-				charFilter.maxRingBands = undefined;
-				charFilter.allowedOrbitalSplits = undefined;
-				charFilter.requiredOrbitalSplits = undefined;
-				charFilter.allowedOrbitalCenterXCategories = undefined;
-				charFilter.allowedOrbitalCenterYCategories = undefined;
-				charFilter.allowedOrbitalBaseStepBp = undefined;
-				charFilter.allowedOrbitalRadialStepBp = undefined;
-				charFilter.minSplitOffsetDeg = undefined;
-				charFilter.maxSplitOffsetDeg = undefined;
-			}
-			if (!shadowsEnabled) {
-				charFilter.allowedShadowsNumCircles = undefined;
-				charFilter.shadowsFillStyle = undefined;
-				charFilter.minShadowsActualCircles = undefined;
-				charFilter.maxShadowsActualCircles = undefined;
-				charFilter.shadowsColumnarSquare = undefined;
-				charFilter.shadowsOutwardRadial = undefined;
-			}
+			const charFilter = cf;
 			const isCharFilterActive =
 				Object.values(charFilter).some((v) => v !== undefined && v !== null);
 			const angleActive = angleApplies && (minAngle > 0 || maxAngle < 90);
@@ -619,9 +770,9 @@
 				address,
 				choices,
 				mode,
-				count,
-				maxAttempts: maxAttempts ?? undefined,
-				workers: workers > 0 ? workers : undefined,
+				count: Math.floor(count),
+				maxAttempts: whole(maxAttempts),
+				workers: workers >= 1 ? Math.floor(workers) : undefined,
 				// The backend lays out a seed only when a point-level filter needs
 				// it; structure filters are checked without one.
 				runLayout,
@@ -664,7 +815,11 @@
 		} catch {}
 	}
 
-	function onTileRendered() {
+	// Seeds in the current results; renders finishing for an older search's
+	// tiles must not count toward this one.
+	const resultSeeds = $derived(new Set(results.map((r) => r.seed)));
+	function onTileRendered(seed: string) {
+		if (!resultSeeds.has(seed)) return;
 		renderedCount += 1;
 		if (
 			renderedCount >= results.length &&
@@ -1129,10 +1284,17 @@
 				<span>90° vertical</span>
 			</div>
 			{#if fixedAngle !== undefined}
-				<div class="angle-note">
-					{choices.flowField} is fixed at {fixedAngle}° — narrowing this range won't
-					change what you get. Use RandomLinear for angles in between.
-				</div>
+				{#if fixedAngle >= minAngle && fixedAngle <= maxAngle}
+					<div class="angle-note">
+						{choices.flowField} is always {fixedAngle}°, so this range doesn't narrow
+						anything. Use RandomLinear for angles in between.
+					</div>
+				{:else}
+					<div class="angle-note warn">
+						{choices.flowField} is always {fixedAngle}°, outside this range, so nothing
+						will match. Widen the range or use RandomLinear.
+					</div>
+				{/if}
 			{/if}
 			</fieldset>
 
@@ -1740,7 +1902,7 @@
 			{#if error}
 				<div class="error">{error}</div>
 			{/if}
-			{#if !busy && renderedCount >= results.length && statusMsg}
+			{#if !busy && statusMsg}
 				<div class="info">{statusMsg}</div>
 			{/if}
 		</section>
@@ -1780,7 +1942,7 @@
 						{thumbWidth}
 						favorited={favorites.has(c.seed)}
 						onOpen={(cc) => (openDetail = cc)}
-						onRendered={onTileRendered}
+						onRendered={() => onTileRendered(c.seed)}
 						onToggleFavorite={() => toggleFavorite(c.seed)}
 					/>
 				{/each}
@@ -2868,6 +3030,10 @@
 	}
 	/* Shown when the chosen Flow field pins the angle, so the range slider
 	   can't actually narrow anything. */
+	.angle-note.warn {
+		color: #c08a5a;
+		background: rgba(192, 138, 90, 0.12);
+	}
 	.angle-note {
 		color: #8fa3b8;
 		font-size: 11px;

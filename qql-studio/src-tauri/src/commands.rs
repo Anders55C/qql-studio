@@ -813,6 +813,17 @@ pub async fn generate_candidates(
     result.map_err(|e| format!("{e:#}"))
 }
 
+/// Random id for this run of the app. The webview can be killed and reloaded
+/// by WebKit (e.g. over its memory limit while hidden) while the app keeps
+/// running; the page compares this id with the one it saved to tell "the view
+/// reloaded" (restore the results) from "the app was relaunched" (start fresh).
+static SESSION_ID: Lazy<u64> = Lazy::new(rand::random);
+
+#[tauri::command]
+pub fn session_id() -> String {
+    format!("{:016x}", *SESSION_ID)
+}
+
 #[tauri::command]
 pub fn cancel_search() {
     CANCEL.store(true, Ordering::SeqCst);
@@ -855,8 +866,11 @@ fn angle_filter_active(min: Option<f64>, max: Option<f64>) -> bool {
 fn angle_passes(angle: Option<f64>, min: Option<f64>, max: Option<f64>) -> bool {
     let min_v = min.unwrap_or(0.0);
     let max_v = max.unwrap_or(90.0);
+    // Slack so seeds computed as e.g. 45.00000000000005° (Diagonal, after a
+    // flip) still pass a range ending at 45.
+    const EPS: f64 = 1e-6;
     match angle {
-        Some(a) => a >= min_v && a <= max_v,
+        Some(a) => a >= min_v - EPS && a <= max_v + EPS,
         // Radial seeds can't satisfy an angle range, so reject them when one
         // is set.
         None => false,
@@ -1182,9 +1196,15 @@ pub async fn render_seed(
     .map_err(|e| format!("worker join error: {e}"))?
 }
 
-/// Render a seed at `width` and write it as `<folder>/<seed-hex>.png` (no "0x"
-/// prefix in the filename). Returns the full path written. Used by the favorite
-/// (heart) action.
+/// File name for a favorited seed: `0x<lowercase hex>.png`. Built from the
+/// parsed seed so save and delete always agree, whatever the input's case,
+/// prefix or whitespace.
+fn favorite_filename(seed: &[u8; 32]) -> String {
+    format!("{}.png", seed_to_hex(seed))
+}
+
+/// Render a seed at `width` and write it as `<folder>/0x<seed-hex>.png`.
+/// Returns the full path written. Used by the favorite (heart) action.
 #[tauri::command]
 pub async fn save_seed_png(
     seed_hex: String,
@@ -1195,9 +1215,9 @@ pub async fn save_seed_png(
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
         let png = render::render_png_bytes(&bytes, w, false).map_err(|e| e.to_string())?;
-        let name = format!("0x{}.png", seed_hex.trim_start_matches("0x"));
-        let path = std::path::Path::new(&folder).join(name);
-        std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
+        let path = std::path::Path::new(&folder).join(favorite_filename(&bytes));
+        std::fs::write(&path, &png)
+            .map_err(|e| format!("write failed ({}): {e}", path.display()))?;
         Ok(path.to_string_lossy().into_owned())
     })
     .await
@@ -1208,12 +1228,12 @@ pub async fn save_seed_png(
 /// as success so the UI stays consistent.
 #[tauri::command]
 pub fn delete_seed_png(folder: String, seed_hex: String) -> Result<(), String> {
-    let name = format!("{}.png", seed_hex.trim_start_matches("0x"));
-    let path = std::path::Path::new(&folder).join(name);
+    let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
+    let path = std::path::Path::new(&folder).join(favorite_filename(&bytes));
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("delete failed: {e}")),
+        Err(e) => Err(format!("delete failed ({}): {e}", path.display())),
     }
 }
 
@@ -1652,6 +1672,56 @@ mod tests {
         }
     }
 
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("qql-studio-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn unhearting_deletes_the_saved_favorite() {
+        let dir = scratch_dir("fav");
+        let folder = dir.to_string_lossy().into_owned();
+        let seed = "0xF30939AD9A36287DC1CEBD9B784067927E7713429461DC01D066FFFF10810307";
+        let saved = tauri::async_runtime::block_on(save_seed_png(seed.into(), 64, folder.clone()))
+            .unwrap();
+        assert!(saved.ends_with(
+            "0xf30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307.png"
+        ));
+        assert!(std::path::Path::new(&saved).exists());
+        // Delete with the form the UI passes (lowercase, 0x-prefixed).
+        delete_seed_png(folder.clone(), seed.to_lowercase()).unwrap();
+        assert!(!std::path::Path::new(&saved).exists());
+        // Malformed seeds are refused rather than turned into a path.
+        assert!(delete_seed_png(folder, "../../etc/x".into()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diagonal_passes_an_angle_range_ending_at_45() {
+        // 45° plus floating-point noise, as Diagonal seeds compute after a flip.
+        assert!(angle_passes(Some(45.000_000_000_000_05), Some(0.0), Some(45.0)));
+        assert!(angle_passes(Some(44.999_999_999_999_95), Some(45.0), Some(90.0)));
+        assert!(!angle_passes(Some(45.5), Some(0.0), Some(45.0)));
+    }
+
+    #[test]
+    fn frame_export_clears_stale_frames() {
+        let dir = scratch_dir("frames");
+        let frames = |n: usize| vec![vec![0u8; 4]; n];
+        render::write_frame_sequence(&frames(5), &dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "keep me").unwrap();
+        render::write_frame_sequence(&frames(2), &dir).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["frame_0001.png", "frame_0002.png", "notes.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn flow_center_frac_matches_layout() {
         // The cheap pre-layout helper must agree with the center the full
@@ -1723,6 +1793,9 @@ mod tests {
         );
         // Each frame is a valid PNG.
         assert_eq!(&frames[0][0..8], b"\x89PNG\r\n\x1a\n");
+        // Asked for 20; the step rounds up, so allow only the extra first and
+        // final frames on top.
+        assert!(frames.len() <= 22, "asked for 20 frames, got {}", frames.len());
         // The APNG is a valid PNG and carries the animation-control (acTL) chunk.
         let apng = render::encode_apng(&frames, 50, 500).unwrap();
         assert_eq!(&apng[0..8], b"\x89PNG\r\n\x1a\n");

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { type Candidate } from './api';
-	import { queuedRenderSeed } from './renderQueue';
+	import { onMount } from 'svelte';
+	import { queuedRenderSeed, StaleRenderError } from './renderQueue';
 
 	type Props = {
 		candidate: Candidate;
@@ -49,6 +50,8 @@
 				onRendered?.(true);
 			}
 		} catch (e) {
+			// Dropped because a newer search replaced these results: say nothing.
+			if (e instanceof StaleRenderError) return;
 			error = String(e);
 			if (!reported) {
 				reported = true;
@@ -59,10 +62,9 @@
 		}
 	}
 
-	$effect(() => {
-		// Auto-render on mount.
-		load();
-	});
+	// Render once on mount. (Not an $effect: that would re-run whenever a
+	// failed render cleared `loading`, retrying a broken seed forever.)
+	onMount(load);
 </script>
 
 <div class="tile">
@@ -78,6 +80,9 @@
 				<div class="placeholder">queued</div>
 			{/if}
 		</button>
+		{#if error && !pngUrl && !loading}
+			<button class="retry" onclick={load}>retry</button>
+		{/if}
 		<button
 			class="heart"
 			class:on={favorited}
@@ -202,6 +207,14 @@
 		height: 100%;
 		color: #888;
 		font-size: 13px;
+	}
+	.retry {
+		position: absolute;
+		left: 50%;
+		bottom: 10px;
+		transform: translateX(-50%);
+		font-size: 11px;
+		padding: 3px 10px;
 	}
 	.placeholder.err {
 		color: #d66;

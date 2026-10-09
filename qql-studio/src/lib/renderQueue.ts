@@ -13,7 +13,26 @@ import { renderSeed, type RenderResult } from './api';
 
 let maxConcurrent = 8;
 let active = 0;
-const waiters: Array<() => void> = [];
+type Waiter = { resolve: () => void; reject: (e: Error) => void };
+let waiters: Waiter[] = [];
+
+/** Thrown to renders that were still queued when a new search started. */
+export class StaleRenderError extends Error {
+	constructor() {
+		super('render dropped: a newer search started');
+	}
+}
+
+/**
+ * Drop every render still waiting in the queue. Called when a new search
+ * starts, so thumbnails from the previous results (no longer on screen) don't
+ * run first and compete with the new search. Renders already in flight finish.
+ */
+export function dropQueuedRenders() {
+	const dropped = waiters;
+	waiters = [];
+	for (const w of dropped) w.reject(new StaleRenderError());
+}
 
 export function setRenderConcurrency(n: number) {
 	const clamped = Math.max(1, Math.min(64, Math.floor(n)));
@@ -26,13 +45,13 @@ function pump() {
 	while (active < maxConcurrent && waiters.length > 0) {
 		active += 1;
 		const next = waiters.shift()!;
-		next();
+		next.resolve();
 	}
 }
 
 function acquire(): Promise<void> {
-	return new Promise<void>((resolve) => {
-		waiters.push(resolve);
+	return new Promise<void>((resolve, reject) => {
+		waiters.push({ resolve, reject });
 		pump();
 	});
 }

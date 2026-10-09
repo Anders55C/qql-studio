@@ -24,7 +24,19 @@
 	let pngUrl = $state<string | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
+	// Width used for Save As. The on-screen preview renders at screen size
+	// instead (see previewWidth): a 9600px preview can use well over a GB.
 	let width = $state(2400);
+	let artPane = $state<HTMLDivElement | null>(null);
+	// Device pixels needed to show the 4:5 image sharply in the art pane,
+	// capped at 2400. Measured once the pane exists.
+	const previewWidth = $derived.by(() => {
+		if (!artPane) return null;
+		const fitCss = Math.min(artPane.clientWidth, artPane.clientHeight * 0.8);
+		const px = Math.ceil(fitCss * (window.devicePixelRatio || 1));
+		return Math.min(2400, Math.max(800, Math.ceil(px / 100) * 100));
+	});
+	let saveNote = $state<{ text: string; err: boolean } | null>(null);
 	let savingFavorite = $state(false);
 	let exporting = $state(false);
 
@@ -47,18 +59,26 @@
 	let renderedStats = $state<LayoutStats | null>(null);
 	const stats = $derived(candidate.stats ?? renderedStats);
 
+	// Each render gets a ticket; only the latest one may update the view, so a
+	// slow older render can't land on top of a newer one.
+	let renderTicket = 0;
 	async function load() {
+		const w = previewWidth;
+		if (w == null) return;
+		const ticket = ++renderTicket;
 		loading = true;
 		error = null;
 		pngUrl = null;
 		try {
-			const r = await renderSeed(candidate.seed, width, inflate);
+			const r = await renderSeed(candidate.seed, w, inflate);
+			if (ticket !== renderTicket) return;
 			pngUrl = r.pngDataUrl;
 			renderedStats = r.stats;
 		} catch (e) {
+			if (ticket !== renderTicket) return;
 			error = String(e);
 		} finally {
-			loading = false;
+			if (ticket === renderTicket) loading = false;
 		}
 	}
 
@@ -77,11 +97,12 @@
 		});
 		if (!dest) return; // cancelled
 		exporting = true;
-		error = null;
+		saveNote = null;
 		try {
 			await exportSeedPng(candidate.seed, width, dest, inflate);
+			saveNote = { text: `Saved ${width}px PNG to ${dest}`, err: false };
 		} catch (e) {
-			error = `Export failed: ${e}`;
+			saveNote = { text: `Save failed: ${e}`, err: true };
 		} finally {
 			exporting = false;
 		}
@@ -251,21 +272,16 @@
 	});
 </script>
 
-<div
-	class="backdrop"
-	onclick={onClose}
-	onkeydown={(e) => e.key === 'Escape' && onClose()}
-	role="button"
-	tabindex="-1"
-></div>
+<svelte:window onkeydown={(e) => e.key === 'Escape' && onClose()} />
+<div class="backdrop" onclick={onClose} role="presentation"></div>
 <div class="panel" role="dialog" aria-modal="true">
-	<div class="art-pane">
+	<div class="art-pane" bind:this={artPane}>
 		{#if frames && showAnim}
 			<img src={frames[frameIdx]} alt="QQL animation frame" />
 		{:else if pngUrl}
 			<img src={pngUrl} alt="QQL render" />
 		{:else if loading}
-			<div class="placeholder">rendering at {width}px…</div>
+			<div class="placeholder">rendering…</div>
 		{:else if error}
 			<div class="placeholder err">{error}</div>
 		{/if}
@@ -297,8 +313,8 @@
 					♡ Save
 				{/if}
 			</button>
-			<label>
-				Render width:
+			<label title="Size of the PNG that Save As writes">
+				Export width:
 				<select bind:value={width}>
 					<option value={1200}>1200</option>
 					<option value={2400}>2400</option>
@@ -326,6 +342,9 @@
 				{showAnim ? '▾ Animate' : '▸ Animate'}
 			</button>
 		</div>
+		{#if saveNote}
+			<div class="save-note" class:err={saveNote.err}>{saveNote.text}</div>
+		{/if}
 
 		{#if showAnim}
 			<div class="anim">
@@ -493,8 +512,9 @@
 						<div class="row sub">
 							<span>Flow center</span>
 							<span>
-								({fl.centerXFrac.toFixed(2)}, {fl.centerYFrac.toFixed(2)})
-								· {onCanvas ? 'on canvas' : 'off canvas'} · not a filter yet
+								{Math.round(fl.centerXFrac * 100)}% across, {Math.round(
+									fl.centerYFrac * 100
+								)}% down · {onCanvas ? 'on canvas' : 'off canvas'}
 							</span>
 						</div>
 					{/if}
@@ -663,6 +683,15 @@
 		place-items: center;
 		overflow: auto;
 		padding: 16px;
+	}
+	.save-note {
+		font-size: 11px;
+		color: #8fc4a8;
+		margin: -4px 0 8px;
+		word-break: break-all;
+	}
+	.save-note.err {
+		color: #d66;
 	}
 	.art-pane img {
 		max-width: 100%;

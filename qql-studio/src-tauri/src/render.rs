@@ -470,7 +470,9 @@ pub fn render_animation_frames(
         _ => layout_only(seed).num_points,
     };
     let frames_wanted = target_frames.clamp(2, 600);
-    let step = ((num_points / frames_wanted).max(1)) as u32;
+    // Round up, so we never produce more frames than asked for (rounding down
+    // could nearly double the count).
+    let step = num_points.div_ceil(frames_wanted).max(1) as u32;
     let total_est = num_points / step.max(1) as usize + 2;
     let chunks = if width >= 1500 { "2x2" } else { "1x1" };
     let cfg = Config {
@@ -551,6 +553,18 @@ pub fn png_to_data_url(png: &[u8]) -> String {
 /// needed). Returns the directory path.
 pub fn write_frame_sequence(frames: &[Vec<u8>], dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Clear frames from an earlier export into the same folder; a shorter
+    // sequence would otherwise leave stale higher-numbered frames behind.
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        let is_frame = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("frame_") && n.ends_with(".png"));
+        if is_frame {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
     for (i, f) in frames.iter().enumerate() {
         let name = format!("frame_{:04}.png", i + 1);
         std::fs::write(dir.join(&name), f).with_context(|| format!("writing {name}"))?;

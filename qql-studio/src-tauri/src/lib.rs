@@ -22,6 +22,7 @@ pub fn run() {
             commands::cancel_animation,
             commands::layout_summary,
             commands::random_seed_for_address,
+            commands::session_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
