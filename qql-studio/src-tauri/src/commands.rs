@@ -784,6 +784,8 @@ pub struct GenerateProgress {
     pub found: usize,
     pub max_attempts: usize,
     pub want: usize,
+    /// Attempts abandoned because their layout hit the layout timeout.
+    pub timed_out: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -793,6 +795,9 @@ pub struct GenerateOutcome {
     pub attempts: usize,
     pub max_attempts: usize,
     pub cancelled: bool,
+    /// How many of `attempts` were abandoned at the layout timeout (they
+    /// count as misses, but may have matched given more time).
+    pub timed_out: usize,
 }
 
 #[tauri::command]
@@ -1006,8 +1011,17 @@ where
     let found_atomic = Arc::new(AtomicUsize::new(0));
     let inflight_attempts = Arc::new(AtomicUsize::new(0));
     let inflight_found = Arc::new(AtomicUsize::new(0));
+    let timed_out = Arc::new(AtomicUsize::new(0));
     let emitter_done = Arc::new(AtomicBool::new(false));
     let on_progress = Arc::new(on_progress);
+
+    // Built before the emitter thread starts, so a failure here can't leave
+    // that thread running.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|i| format!("qql-search-{i}"))
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build thread pool: {e}"))?;
 
     // Spawn a dedicated emitter so the UI sees regular updates even if the
     // search itself runs in tight, sub-millisecond loops.
@@ -1016,6 +1030,7 @@ where
         let found_atomic = found_atomic.clone();
         let inflight_attempts = inflight_attempts.clone();
         let inflight_found = inflight_found.clone();
+        let timed_out = timed_out.clone();
         let emitter_done = emitter_done.clone();
         let on_progress = on_progress.clone();
         std::thread::Builder::new()
@@ -1026,6 +1041,7 @@ where
                     found: 0,
                     max_attempts,
                     want,
+                    timed_out: 0,
                 });
                 while !emitter_done.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(60));
@@ -1042,134 +1058,147 @@ where
                         found,
                         max_attempts,
                         want,
+                        timed_out: timed_out.load(Ordering::Relaxed),
                     });
                 }
             })
             .expect("failed to spawn progress emitter")
     };
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .thread_name(|i| format!("qql-search-{i}"))
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build thread pool: {e}"))?;
+    // Run the search in a closure so that any early `?` exit still reaches the
+    // emitter shutdown below.
+    let mut search = || -> anyhow::Result<()> {
+        while results.len() < want && attempts < max_attempts {
+            if CANCEL.load(Ordering::SeqCst) {
+                cancelled = true;
+                break;
+            }
 
-    while results.len() < want && attempts < max_attempts {
-        if CANCEL.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
-        }
+            let remaining_attempts = max_attempts - attempts;
+            let this_batch = batch_size.min(remaining_attempts);
+            if this_batch == 0 {
+                break;
+            }
 
-        let remaining_attempts = max_attempts - attempts;
-        let this_batch = batch_size.min(remaining_attempts);
-        if this_batch == 0 {
-            break;
-        }
+            let mut batch: Vec<[u8; 32]> = Vec::with_capacity(this_batch);
+            for _ in 0..this_batch {
+                batch.push(make_seed(&request, &address, &mut rng)?);
+            }
 
-        let mut batch: Vec<[u8; 32]> = Vec::with_capacity(this_batch);
-        for _ in 0..this_batch {
-            batch.push(make_seed(&request, &address, &mut rng)?);
-        }
+            // Reset per-batch counters so the emitter sees a fresh in-flight tally.
+            inflight_attempts.store(0, Ordering::Relaxed);
+            inflight_found.store(0, Ordering::Relaxed);
 
-        // Reset per-batch counters so the emitter sees a fresh in-flight tally.
-        inflight_attempts.store(0, Ordering::Relaxed);
-        inflight_found.store(0, Ordering::Relaxed);
-
-        let batch_results: Vec<Option<Candidate>> = {
-            let inflight_attempts = &inflight_attempts;
-            let inflight_found = &inflight_found;
-            pool.install(|| {
-                batch
-                    .par_iter()
-                    .map(|seed| {
-                        // Fast bail when the user has hit Cancel. Each worker
-                        // still has to finish the layout it's currently on, but
-                        // subsequent items in its slice are skipped.
-                        if CANCEL.load(Ordering::Relaxed) {
-                            return None;
-                        }
-                        let traits = q::Traits::from_seed(seed);
-                        if !matches_filter(&traits, &request.choices) {
-                            inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                            return None;
-                        }
-                        if angle_active {
-                            let angle = linear_flow_angle_deg(seed, &traits);
-                            if !angle_passes(angle, min_angle, max_angle) {
+            let batch_results: Vec<Option<Candidate>> = {
+                let inflight_attempts = &inflight_attempts;
+                let inflight_found = &inflight_found;
+                pool.install(|| {
+                    batch
+                        .par_iter()
+                        .map(|seed| {
+                            // Fast bail when the user has hit Cancel. Each worker
+                            // still has to finish the layout it's currently on, but
+                            // subsequent items in its slice are skipped.
+                            if CANCEL.load(Ordering::Relaxed) {
+                                return None;
+                            }
+                            let traits = q::Traits::from_seed(seed);
+                            if !matches_filter(&traits, &request.choices) {
                                 inflight_attempts.fetch_add(1, Ordering::Relaxed);
                                 return None;
                             }
-                        }
-                        if let Some(bounds) = center_bounds {
-                            let center = qql::art::flow_center_frac(seed, render::color_db());
-                            if !bounds.passes(center) {
-                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                return None;
-                            }
-                        }
-                        if let Some(filter) = structure_filter {
-                            if !filter.matches_structure(&render::structure_only(seed)) {
-                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                return None;
-                            }
-                        }
-                        let stats = if needs_layout {
-                            let deadline =
-                                layout_timeout.map(|d| std::time::Instant::now() + d);
-                            match render::layout_only_with_limits(seed, deadline, point_cap) {
-                                Some(s) => Some(s),
-                                None => {
-                                    // Timed out or went over the max-points
-                                    // cap — count the attempt and move on.
+                            if angle_active {
+                                let angle = linear_flow_angle_deg(seed, &traits);
+                                if !angle_passes(angle, min_angle, max_angle) {
                                     inflight_attempts.fetch_add(1, Ordering::Relaxed);
                                     return None;
                                 }
                             }
-                        } else {
-                            None
-                        };
-                        if let (Some(filter), Some(s)) = (points_filter, stats.as_ref()) {
-                            if !filter.matches_points(s) {
-                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                return None;
+                            if let Some(bounds) = center_bounds {
+                                let center = qql::art::flow_center_frac(seed, render::color_db());
+                                if !bounds.passes(center) {
+                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                    return None;
+                                }
                             }
-                        }
-                        inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                        inflight_found.fetch_add(1, Ordering::Relaxed);
-                        Some(Candidate {
-                            seed: seed_to_hex(seed),
-                            traits: TraitsWire::from(&traits),
-                            stats,
+                            if let Some(filter) = structure_filter {
+                                if !filter.matches_structure(&render::structure_only(seed)) {
+                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                    return None;
+                                }
+                            }
+                            let stats = if needs_layout {
+                                let deadline =
+                                    layout_timeout.map(|d| std::time::Instant::now() + d);
+                                match render::layout_only_with_limits(
+                                    seed,
+                                    deadline,
+                                    point_cap,
+                                    Some(&CANCEL),
+                                ) {
+                                    Some(s) => Some(s),
+                                    None => {
+                                        // Timed out, went over the max-points cap,
+                                        // or was cancelled — count the attempt and
+                                        // move on.
+                                        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                            timed_out.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                        return None;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let (Some(filter), Some(s)) = (points_filter, stats.as_ref()) {
+                                if !filter.matches_points(s) {
+                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                                    return None;
+                                }
+                            }
+                            inflight_attempts.fetch_add(1, Ordering::Relaxed);
+                            inflight_found.fetch_add(1, Ordering::Relaxed);
+                            Some(Candidate {
+                                seed: seed_to_hex(seed),
+                                traits: TraitsWire::from(&traits),
+                                stats,
+                            })
                         })
-                    })
-                    .collect()
-            })
-        };
+                        .collect()
+                })
+            };
 
-        // Commit the in-flight counters into the running totals. Use the
-        // actual evaluated count so cancelled batches don't inflate `attempts`.
-        let batch_attempts = inflight_attempts.load(Ordering::Relaxed);
-        attempts += batch_attempts;
-        attempts_atomic.store(attempts, Ordering::Relaxed);
-        for hit in batch_results.into_iter().flatten() {
-            if results.len() >= want {
-                break;
+            // Commit the in-flight counters into the running totals. Use the
+            // actual evaluated count so cancelled batches don't inflate `attempts`.
+            let batch_attempts = inflight_attempts.load(Ordering::Relaxed);
+            attempts += batch_attempts;
+            attempts_atomic.store(attempts, Ordering::Relaxed);
+            for hit in batch_results.into_iter().flatten() {
+                if results.len() >= want {
+                    break;
+                }
+                results.push(hit);
             }
-            results.push(hit);
+            found_atomic.store(results.len(), Ordering::Relaxed);
+            inflight_attempts.store(0, Ordering::Relaxed);
+            inflight_found.store(0, Ordering::Relaxed);
         }
-        found_atomic.store(results.len(), Ordering::Relaxed);
-        inflight_attempts.store(0, Ordering::Relaxed);
-        inflight_found.store(0, Ordering::Relaxed);
-    }
+        Ok(())
+    };
+    let search_result = search();
 
-    // Stop the emitter and flush a definitive final state.
+    // Stop the emitter (also on error) and flush a definitive final state.
     emitter_done.store(true, Ordering::Relaxed);
     let _ = emitter_handle.join();
+    search_result?;
+    let timed_out = timed_out.load(Ordering::Relaxed);
     on_progress(GenerateProgress {
         attempts,
         found: results.len(),
         max_attempts,
         want,
+        timed_out,
     });
 
     Ok(GenerateOutcome {
@@ -1177,6 +1206,7 @@ where
         attempts,
         max_attempts,
         cancelled,
+        timed_out,
     })
 }
 
@@ -1189,7 +1219,7 @@ pub async fn render_seed(
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
-        render::render(&bytes, w, inflate.unwrap_or(false)).map_err(|e| e.to_string())
+        render::render(&bytes, w, inflate.unwrap_or(false)).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
@@ -1213,7 +1243,12 @@ pub async fn save_seed_png(
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
-        let png = render::render_png_bytes(&bytes, w, false).map_err(|e| e.to_string())?;
+        if !std::path::Path::new(&folder).is_dir() {
+            return Err(format!(
+                "Favorites folder not found: {folder}. Choose the save folder again."
+            ));
+        }
+        let png = render::render_png_bytes(&bytes, w, false).map_err(|e| format!("{e:#}"))?;
         let path = std::path::Path::new(&folder).join(favorite_filename(&bytes));
         std::fs::write(&path, &png)
             .map_err(|e| format!("write failed ({}): {e}", path.display()))?;
@@ -1221,6 +1256,25 @@ pub async fn save_seed_png(
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
+}
+
+/// Seeds that have a saved favorite PNG (`0x<64 hex>.png`) in `folder`, so
+/// the hearts can be restored on launch. A missing folder gives an empty list.
+#[tauri::command]
+pub fn list_favorites(folder: String) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| {
+            let stem = name.strip_suffix(".png")?;
+            let bytes = parse_seed_hex(stem).ok()?;
+            // Only files in the exact form we write, not any PNG named like hex.
+            (favorite_filename(&bytes) == name).then(|| seed_to_hex(&bytes))
+        })
+        .collect()
 }
 
 /// Delete a previously-saved favorite PNG (un-hearting). Missing file is treated
@@ -1249,8 +1303,8 @@ pub async fn export_seed_png(
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
         let png = render::render_png_bytes(&bytes, w, inflate.unwrap_or(false))
-            .map_err(|e| e.to_string())?;
-        std::fs::write(&path, &png).map_err(|e| format!("write failed: {e}"))?;
+            .map_err(|e| format!("{e:#}"))?;
+        std::fs::write(&path, &png).map_err(|e| format!("write failed ({path}): {e}"))?;
         Ok(path)
     })
     .await
@@ -1610,7 +1664,7 @@ mod tests {
             let full = render::layout_only(&bytes);
             let n = full.num_points;
             for cap in [n.saturating_sub(1), n, n + 1, n / 2] {
-                let capped = render::layout_only_with_limits(&bytes, None, Some(cap));
+                let capped = render::layout_only_with_limits(&bytes, None, Some(cap), None);
                 assert_eq!(capped.is_some(), n <= cap, "seed {hex_str} n={n} cap={cap}");
                 if let Some(c) = capped {
                     assert_eq!(format!("{c:?}"), format!("{full:?}"), "seed {hex_str}");
@@ -1695,6 +1749,104 @@ mod tests {
         // Malformed seeds are refused rather than turned into a path.
         assert!(delete_seed_png(folder, "../../etc/x".into()).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_favorites_finds_saved_seeds_only() {
+        let dir = scratch_dir("favlist");
+        let folder = dir.to_string_lossy().into_owned();
+        let a = "0xf30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307";
+        tauri::async_runtime::block_on(save_seed_png(a.into(), 64, folder.clone())).unwrap();
+        // Files that aren't favorites must be ignored.
+        std::fs::write(dir.join("notes.png"), b"x").unwrap();
+        std::fs::write(dir.join("f30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307.png"), b"x").unwrap();
+        assert_eq!(list_favorites(folder.clone()), vec![a.to_string()]);
+        assert!(list_favorites(dir.join("missing").to_string_lossy().into_owned()).is_empty());
+        // Saving into a missing folder explains itself.
+        let err = tauri::async_runtime::block_on(save_seed_png(
+            a.into(),
+            64,
+            dir.join("missing").to_string_lossy().into_owned(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("Favorites folder not found"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_stops_when_cancelled() {
+        let seed: [u8; 32] =
+            hex::decode("039cd535c7d3bcb04e93ad44491b30185ee0a4c5054a62710a45ffff10a1ca43")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let cancel = AtomicBool::new(true);
+        let t = std::time::Instant::now();
+        assert!(render::layout_only_with_limits(&seed, None, None, Some(&cancel)).is_none());
+        assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+        cancel.store(false, Ordering::Relaxed);
+        assert!(render::layout_only_with_limits(&seed, None, None, Some(&cancel)).is_some());
+    }
+
+    #[test]
+    fn timeouts_are_counted_separately() {
+        let mut choices = TraitChoices::default();
+        choices.spacing = Some("Dense".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 4,
+            max_attempts: Some(8),
+            run_layout: true,
+            characteristic_filter: None,
+            rng_seed: Some(2),
+            workers: Some(4),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            // 1 ms: every dense layout times out.
+            layout_timeout_ms: Some(1),
+        };
+        let outcome = generate_candidates_inner(req, |_| {}).unwrap();
+        assert!(outcome.timed_out > 0, "expected timeouts");
+        assert!(outcome.timed_out <= outcome.attempts);
+    }
+
+    #[test]
+    fn failed_search_stops_its_progress_updates() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let mut choices = TraitChoices::default();
+        choices.structure = Some("NotAStructure".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 4,
+            max_attempts: Some(100),
+            run_layout: false,
+            characteristic_filter: None,
+            rng_seed: Some(1),
+            workers: Some(2),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            layout_timeout_ms: None,
+        };
+        let result = generate_candidates_inner(req, move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(result.is_err());
+        let after = calls.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(calls.load(Ordering::Relaxed), after, "progress kept firing after the error");
     }
 
     #[test]

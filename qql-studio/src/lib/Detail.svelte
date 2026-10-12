@@ -10,6 +10,7 @@
 		type LayoutStats
 	} from './api';
 	import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { onDestroy, onMount } from 'svelte';
 
@@ -18,8 +19,33 @@
 		favorited?: boolean;
 		onClose: () => void;
 		onToggleFavorite?: () => Promise<void> | void;
+		/** e.g. "3 / 40" when opened from the results grid. */
+		position?: string | null;
+		onPrev?: () => void;
+		onNext?: () => void;
 	};
-	let { candidate, favorited = false, onClose, onToggleFavorite }: Props = $props();
+	let {
+		candidate,
+		favorited = false,
+		onClose,
+		onToggleFavorite,
+		position = null,
+		onPrev,
+		onNext
+	}: Props = $props();
+
+	let copied = $state<'' | 'ok' | 'failed'>('');
+	function onKey(e: KeyboardEvent) {
+		if (e.key === 'Escape') return onClose();
+		// Arrow keys step through results, unless a form field has focus.
+		const tag = (e.target as HTMLElement | null)?.tagName;
+		if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+		if (e.key === 'ArrowLeft' && onPrev) onPrev();
+		if (e.key === 'ArrowRight' && onNext) onNext();
+	}
+	function openOnQql() {
+		openUrl(`https://qql.art/token/${candidate.seed}`).catch(() => {});
+	}
 
 	let pngUrl = $state<string | null>(null);
 	let loading = $state(false);
@@ -82,8 +108,14 @@
 		}
 	}
 
-	function copy() {
-		navigator.clipboard.writeText(candidate.seed);
+	async function copy() {
+		try {
+			await navigator.clipboard.writeText(candidate.seed);
+			copied = 'ok';
+		} catch {
+			copied = 'failed';
+		}
+		setTimeout(() => (copied = ''), 1200);
 	}
 
 	// Deliberate one-off export: pick a destination, render at the Detail's
@@ -272,7 +304,7 @@
 	});
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && onClose()} />
+<svelte:window onkeydown={onKey} />
 <div class="backdrop" onclick={onClose} role="presentation"></div>
 <div class="panel" role="dialog" aria-modal="true">
 	<div class="art-pane" bind:this={artPane}>
@@ -290,9 +322,17 @@
 		<div class="header">
 			<button class="close" onclick={onClose} aria-label="Close">×</button>
 			<h2>Seed</h2>
+			{#if position}
+				<div class="nav">
+					<button onclick={() => onPrev?.()} disabled={!onPrev} aria-label="Previous seed" title="Previous (←)">‹</button>
+					<span>{position}</span>
+					<button onclick={() => onNext?.()} disabled={!onNext} aria-label="Next seed" title="Next (→)">›</button>
+				</div>
+			{/if}
 			<div class="seed-row">
 				<code>{candidate.seed}</code>
-				<button onclick={copy}>copy</button>
+				<button onclick={copy}>{copied === 'ok' ? 'copied ✓' : copied === 'failed' ? 'copy failed' : 'copy'}</button>
+				<button onclick={openOnQql} title="Open this seed's page on qql.art">qql.art ↗</button>
 			</div>
 		</div>
 		<div class="actions">
@@ -684,6 +724,19 @@
 		place-items: center;
 		overflow: auto;
 		padding: 16px;
+	}
+	.nav {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 12px;
+		color: #999;
+		margin: 2px 0 6px;
+	}
+	.nav button {
+		padding: 0 10px;
+		font-size: 16px;
+		line-height: 1.4;
 	}
 	.save-note {
 		font-size: 11px;

@@ -7,9 +7,9 @@
 		deleteSeedPng,
 		emptyChoices,
 		generateCandidates,
-		layoutSummary,
 		listPaletteColors,
 		sessionId,
+		listFavorites,
 		listTraits,
 		saveSeedPng,
 		type Candidate,
@@ -226,6 +226,8 @@
 		const reasons: string[] = [];
 		if (count == null || !Number.isFinite(count) || count < 1) {
 			reasons.push('Count: enter how many seeds to find (1 or more).');
+		} else if (count > 2048) {
+			reasons.push('Count: the most one search can return is 2,048.');
 		}
 		if (chunksImpossible) {
 			reasons.push(
@@ -401,6 +403,18 @@
 	let cancelling = $state(false);
 	let progress = $state<GenerateProgress | null>(null);
 	let statusMsg = $state('');
+	// When the current search started (for hit rate / time estimates), and a
+	// summary of the last finished search (for the "no matches" screen).
+	let searchStartedAt = $state<number | null>(null);
+	let lastSearch = $state<{
+		attempts: number;
+		maxAttempts: number;
+		cancelled: boolean;
+		timedOut: number;
+	} | null>(null);
+	// Results view: optional sort and favorites-only toggle.
+	let sortBy = $state<'found' | 'pointsDesc' | 'pointsAsc' | 'colorsDesc'>('found');
+	let favoritesOnly = $state(false);
 	let error = $state<string | null>(null);
 	let openDetail = $state<Candidate | null>(null);
 	let inspectHex = $state('');
@@ -486,6 +500,21 @@
 		await restoreAfterReload();
 	});
 
+	// Hearts mirror the PNGs actually in the save folder, so they survive a
+	// restart and follow the folder if it changes.
+	$effect(() => {
+		const folder = saveFolder;
+		if (!folder) {
+			favorites = new Set();
+			return;
+		}
+		listFavorites(folder)
+			.then((seeds) => {
+				if (saveFolder === folder) favorites = new Set(seeds);
+			})
+			.catch(() => {});
+	});
+
 	// ---- Survive a webview reload ------------------------------------------
 	// WebKit kills and silently reloads the page when it uses too much memory
 	// while hidden (e.g. lots of tiles, laptop asleep). The app itself keeps
@@ -506,7 +535,6 @@
 			if (snap.session !== appSession || !Array.isArray(snap.results)) return;
 			if (snap.results.length === 0) return;
 			results = snap.results;
-			favorites = new Set(Array.isArray(snap.favorites) ? snap.favorites : []);
 			statusMsg = `Restored ${results.length} results after the view reloaded (it can run out of memory while hidden).`;
 			renderRunStart = performance.now();
 		} catch {}
@@ -514,7 +542,7 @@
 
 	$effect(() => {
 		if (!appSession || busy) return;
-		const snap = { session: appSession, results, favorites: [...favorites] };
+		const snap = { session: appSession, results };
 		try {
 			localStorage.setItem(RESULTS_KEY, JSON.stringify(snap));
 		} catch {
@@ -745,6 +773,8 @@
 		}
 		progress = null;
 		results = [];
+		lastSearch = null;
+		searchStartedAt = performance.now();
 		dropQueuedRenders();
 		renderedCount = 0;
 		renderRunStart = null;
@@ -779,12 +809,23 @@
 						: undefined
 			});
 			results = outcome.candidates;
+			lastSearch = {
+				attempts: outcome.attempts,
+				maxAttempts: outcome.maxAttempts,
+				cancelled: outcome.cancelled,
+				timedOut: outcome.timedOut
+			};
+			const rate = results.length > 0 ? ` (1 in ${hitRate(outcome.attempts, results.length)})` : '';
+			const timeouts =
+				outcome.timedOut > 0
+					? ` ${outcome.timedOut.toLocaleString()} hit the layout timeout.`
+					: '';
 			if (outcome.cancelled) {
-				statusMsg = `Cancelled. Got ${results.length}/${count} after ${outcome.attempts.toLocaleString()} attempts.`;
+				statusMsg = `Cancelled. Got ${results.length}/${count} after ${outcome.attempts.toLocaleString()} attempts${rate}.${timeouts}`;
 			} else if (results.length < count) {
-				statusMsg = `Got ${results.length}/${count} after ${outcome.attempts.toLocaleString()} attempts (cap ${outcome.maxAttempts.toLocaleString()}). Try widening filters or raise max attempts.`;
+				statusMsg = `Got ${results.length}/${count} after ${outcome.attempts.toLocaleString()} attempts${rate} (cap ${outcome.maxAttempts.toLocaleString()}). Try widening filters or raise max attempts.${timeouts}`;
 			} else {
-				statusMsg = `Found ${results.length} in ${outcome.attempts.toLocaleString()} attempts.`;
+				statusMsg = `Found ${results.length} in ${outcome.attempts.toLocaleString()} attempts${rate}.${timeouts}`;
 			}
 			if (results.length > 0) {
 				renderRunStart = performance.now();
@@ -795,6 +836,56 @@
 			busy = false;
 			cancelling = false;
 		}
+	}
+
+	// "1 in N", rounded to something readable.
+	function hitRate(attempts: number, found: number): string {
+		const n = attempts / Math.max(1, found);
+		return n >= 100 ? Math.round(n).toLocaleString() : n >= 10 ? n.toFixed(0) : n.toFixed(1);
+	}
+
+	// Rough time left, from the pace so far. Null until something is found.
+	const searchEta = $derived.by(() => {
+		if (!busy || !progress || progress.found === 0 || searchStartedAt === null) return null;
+		const elapsed = (performance.now() - searchStartedAt) / 1000;
+		const left = (elapsed / progress.found) * (progress.want - progress.found);
+		if (left < 1) return null;
+		return left < 90 ? `~${Math.round(left)}s left` : `~${Math.round(left / 60)} min left`;
+	});
+
+	// The grid order: as found, or sorted by stats (seeds without stats go to
+	// the end). "♥ only" hides tiles with CSS rather than removing them, so
+	// their rendered images survive toggling it off again.
+	const displayed = $derived.by(() => {
+		let list = results;
+		if (sortBy !== 'found') {
+			const key = (r: Candidate) =>
+				r.stats == null
+					? null
+					: sortBy === 'colorsDesc'
+						? r.stats.colorsUsed.length
+						: r.stats.numPoints;
+			const dir = sortBy === 'pointsAsc' ? 1 : -1;
+			list = [...list].sort((a, b) => {
+				const ka = key(a), kb = key(b);
+				if (ka == null || kb == null) return (ka == null ? 1 : 0) - (kb == null ? 1 : 0);
+				return (ka - kb) * dir;
+			});
+		}
+		return list;
+	});
+	const anyStats = $derived(results.some((r) => r.stats != null));
+
+	// Previous / next in the inspector walk the grid as currently shown.
+	const navList = $derived(
+		favoritesOnly ? displayed.filter((r) => favorites.has(r.seed)) : displayed
+	);
+	const navIndex = $derived(
+		openDetail ? navList.findIndex((r) => r.seed === openDetail!.seed) : -1
+	);
+	function stepDetail(delta: number) {
+		const i = navIndex + delta;
+		if (navIndex >= 0 && i >= 0 && i < navList.length) openDetail = navList[i];
 	}
 
 	async function onCancel() {
@@ -824,23 +915,24 @@
 		choices = emptyChoices();
 	}
 
-	// Inspect any seed: decode its traits, fetch layout stats, and open the
-	// Detail view (where it can be rendered, animated, and exported).
+	// Inspect any seed: decode its traits and open the Detail view (where it
+	// can be rendered, animated, and exported). Accepts a bare seed or any
+	// text containing one, such as a qql.art token link. Detail fills in the
+	// layout stats from its own render, so we don't wait for a layout here.
 	async function inspectSeed() {
 		const raw = inspectHex.trim();
 		if (!raw || inspecting) return;
 		inspectErr = null;
+		const hex = raw.match(/(?:0x)?([0-9a-fA-F]{64})(?![0-9a-fA-F])/)?.[1];
+		if (!hex) {
+			inspectErr = "Couldn't find a seed in that text. Paste a 64-character seed or a qql.art token link.";
+			return;
+		}
 		inspecting = true;
 		try {
-			const traits = await decodeSeed(raw);
-			const seed = raw.startsWith('0x') ? raw : `0x${raw}`;
-			let stats = null;
-			try {
-				stats = await layoutSummary(seed);
-			} catch {
-				// non-fatal — Detail still renders + animates without layout stats
-			}
-			openDetail = { seed, traits, stats };
+			const seed = `0x${hex.toLowerCase()}`;
+			const traits = await decodeSeed(seed);
+			openDetail = { seed, traits, stats: null };
 		} catch (e) {
 			inspectErr = String(e);
 		} finally {
@@ -1749,7 +1841,13 @@
 			<div class="char-grid">
 				<label class="block">
 					<span class="label">Count</span>
-					<input type="number" bind:value={count} min="1" max="200" />
+					<input type="number" bind:value={count} min="1" max="2048" />
+					{#if count > 400}
+						<small class="count-warn">
+							Large result sets use a lot of memory; if the view reloads, your
+							results are restored.
+						</small>
+					{/if}
 				</label>
 				<label class="block">
 					<span class="label">Max attempts</span>
@@ -1837,6 +1935,19 @@
 							<strong>{progress?.found ?? 0}</strong> / {progress?.want ?? count}
 						</span>
 					</div>
+					{#if progress && (progress.found > 0 || progress.timedOut > 0)}
+						<div class="progress-line sub">
+							{#if progress.found > 0}
+								<span>1 in {hitRate(progress.attempts, progress.found)}</span>
+							{/if}
+							{#if searchEta}
+								<span>· {searchEta}</span>
+							{/if}
+							{#if progress.timedOut > 0}
+								<span>· {progress.timedOut.toLocaleString()} timed out</span>
+							{/if}
+						</div>
+					{/if}
 					<div class="bar">
 						<div
 							class="bar-fill"
@@ -1878,7 +1989,28 @@
 	</aside>
 
 	<main class="results">
-		{#if results.length === 0 && !busy}
+		{#if results.length === 0 && !busy && lastSearch}
+			<div class="empty">
+				<h2>{lastSearch.cancelled ? 'Cancelled before any matches' : 'No matches'}</h2>
+				<p>
+					Checked {lastSearch.attempts.toLocaleString()} seeds{lastSearch.cancelled
+						? ''
+						: ` (the cap was ${lastSearch.maxAttempts.toLocaleString()})`} and none passed
+					every filter.
+				</p>
+				<ul>
+					{#if lastSearch.timedOut > 0}
+						<li>
+							{lastSearch.timedOut.toLocaleString()} of them hit the layout timeout before
+							they could be checked. Raise the timeout (or turn it off) to give dense
+							seeds more time.
+						</li>
+					{/if}
+					<li>Loosen or clear the narrowest filter, then try again.</li>
+					<li>Raise Max attempts to search longer.</li>
+				</ul>
+			</div>
+		{:else if results.length === 0 && !busy}
 			<div class="empty">
 				<h2>Nothing yet</h2>
 				<p>
@@ -1894,6 +2026,23 @@
 			</div>
 		{:else}
 			<div class="results-header">
+				<div class="results-tools">
+					{#if anyStats}
+						<label>
+							Sort
+							<select bind:value={sortBy}>
+								<option value="found">as found</option>
+								<option value="pointsDesc">most points</option>
+								<option value="pointsAsc">fewest points</option>
+								<option value="colorsDesc">most colors</option>
+							</select>
+						</label>
+					{/if}
+					<label class="checkbox">
+						<input type="checkbox" bind:checked={favoritesOnly} />
+						<span>♥ only</span>
+					</label>
+				</div>
 				<div class="results-summary">
 					{results.length}
 					{results.length === 1 ? 'seed' : 'seeds'}
@@ -1905,27 +2054,34 @@
 				</div>
 			</div>
 			<div class="grid-results" style="--tile-size: {tileDisplayWidth}px">
-				{#each results as c (c.seed)}
-					<Tile
-						candidate={c}
-						{thumbWidth}
-						favorited={favorites.has(c.seed)}
-						onOpen={(cc) => (openDetail = cc)}
-						onRendered={() => onTileRendered(c.seed)}
-						onToggleFavorite={() => toggleFavorite(c.seed)}
-					/>
+				{#each displayed as c (c.seed)}
+					<div class="tile-slot" class:hidden={favoritesOnly && !favorites.has(c.seed)}>
+						<Tile
+							candidate={c}
+							{thumbWidth}
+							favorited={favorites.has(c.seed)}
+							onOpen={(cc) => (openDetail = cc)}
+							onRendered={() => onTileRendered(c.seed)}
+							onToggleFavorite={() => toggleFavorite(c.seed)}
+						/>
+					</div>
 				{/each}
 			</div>
 		{/if}
 	</main>
 
 	{#if openDetail}
+		{#key openDetail.seed}
 		<Detail
 			candidate={openDetail}
+			position={navIndex >= 0 ? `${navIndex + 1} / ${navList.length}` : null}
+			onPrev={navIndex > 0 ? () => stepDetail(-1) : undefined}
+			onNext={navIndex >= 0 && navIndex < navList.length - 1 ? () => stepDetail(1) : undefined}
 			favorited={favorites.has(openDetail.seed)}
 			onClose={() => (openDetail = null)}
 			onToggleFavorite={() => toggleFavorite(openDetail!.seed)}
 		/>
+		{/key}
 	{/if}
 </div>
 
@@ -3094,6 +3250,31 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(var(--tile-size, 240px), 1fr));
 		gap: 12px;
+	}
+	.tile-slot.hidden {
+		display: none;
+	}
+	.results-tools {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-size: 12px;
+		color: #aaa;
+	}
+	.results-tools select {
+		margin-left: 4px;
+	}
+	.count-warn {
+		display: block;
+		font-size: 10px;
+		color: #c08a5a;
+		margin-top: 3px;
+		line-height: 1.3;
+	}
+	.progress-line.sub {
+		font-size: 11px;
+		color: #999;
+		margin-top: 2px;
 	}
 	.results-header {
 		display: flex;

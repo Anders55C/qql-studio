@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source, StrokeStyle};
@@ -1023,15 +1024,17 @@ impl Points {
             rng,
             None,
             None,
+            None,
         )
-        .expect("no deadline or point cap => never aborts")
+        .expect("no deadline, point cap or cancel => never aborts")
     }
 
     /// Like [`build`], but if `deadline` is `Some`, periodically checks the
     /// clock between flow lines and returns `None` if the deadline has passed.
     /// Used to bound worst-case time on dense pieces. Likewise returns `None`
     /// as soon as more than `max_points` points have been placed, for filters
-    /// that only need to know the piece is over a point budget.
+    /// that only need to know the piece is over a point budget, and when
+    /// `cancel` (if given) becomes true.
     #[allow(clippy::too_many_arguments)]
     pub fn build_with_deadline(
         traits: &Traits,
@@ -1047,6 +1050,7 @@ impl Points {
         rng: &mut Rng,
         deadline: Option<Instant>,
         max_points: Option<usize>,
+        cancel: Option<&AtomicBool>,
     ) -> Option<(Points, GroupSizes)> {
         fn random_idx(len: usize, rng: &mut Rng) -> usize {
             rng.uniform(0.0, len as f64) as usize
@@ -1063,10 +1067,8 @@ impl Points {
         let mut group_sizes = Vec::with_capacity(groups.len());
         let dump_points = std::env::var("QQL_DUMP_POINTS").is_ok();
         for (group_idx, group) in groups.into_iter().enumerate() {
-            if let Some(d) = deadline {
-                if Instant::now() >= d {
-                    return None;
-                }
+            if stop_requested(deadline, cancel) {
+                return None;
             }
             if rng.odds(color_change_odds.group) {
                 primary_color_idx =
@@ -1096,6 +1098,7 @@ impl Points {
                 rng,
                 deadline,
                 max_points,
+                cancel,
             );
             if aborted {
                 return None;
@@ -1119,8 +1122,8 @@ impl Points {
         Some((Points(all_points), GroupSizes(group_sizes)))
     }
 
-    /// Returns `true` if the build was aborted because the deadline expired
-    /// or more than `max_points` points were placed.
+    /// Returns `true` if the build was aborted because the deadline expired,
+    /// more than `max_points` points were placed, or `cancel` was set.
     #[allow(clippy::too_many_arguments)]
     fn build_group(
         dest: &mut Vec<Point>,
@@ -1142,6 +1145,7 @@ impl Points {
         rng: &mut Rng,
         deadline: Option<Instant>,
         max_points: Option<usize>,
+        cancel: Option<&AtomicBool>,
     ) -> bool {
         if rng.odds(color_change_odds.line) {
             scale_generator.change(rng);
@@ -1169,10 +1173,8 @@ impl Points {
         );
 
         for &start in &group.start_points {
-            if let Some(d) = deadline {
-                if Instant::now() >= d {
-                    return true;
-                }
+            if stop_requested(deadline, cancel) {
+                return true;
             }
             tracer.trace(start, group.ignore, line_buf);
             for &(x, y) in line_buf.iter() {
@@ -1225,6 +1227,13 @@ impl Points {
         }
         false
     }
+}
+
+/// Whether a bounded layout should give up: its deadline has passed or its
+/// cancel flag has been raised.
+fn stop_requested(deadline: Option<Instant>, cancel: Option<&AtomicBool>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+        || cancel.is_some_and(|c| c.load(Ordering::Relaxed))
 }
 
 fn pick_next_color(seq: &[ColorKey], current_idx: usize, rng: &mut Rng) -> usize {
@@ -2487,14 +2496,18 @@ pub fn layout(seed: &[u8; 32], color_db: &ColorDb, config: &Config) -> LayoutSum
 /// a piece that crosses the cap can never satisfy a "at most N points"
 /// filter — stopping there skips the rest of the layout, which for dense
 /// pieces is most of it.
+///
+/// It also gives up as soon as `cancel` (if given) is set, so a search can be
+/// cancelled without waiting for its slowest layout to finish.
 pub fn layout_with_limits(
     seed: &[u8; 32],
     color_db: &ColorDb,
     config: &Config,
     deadline: Option<Instant>,
     max_points: Option<usize>,
+    cancel: Option<&AtomicBool>,
 ) -> Option<LayoutSummary> {
-    layout_impl(seed, color_db, config, deadline, max_points)
+    layout_impl(seed, color_db, config, deadline, max_points, cancel)
 }
 
 /// Like [`layout`] but bails out and returns `None` if `deadline` has passed
@@ -2506,7 +2519,7 @@ pub fn layout_with_deadline(
     config: &Config,
     deadline: Option<Instant>,
 ) -> Option<LayoutSummary> {
-    layout_impl(seed, color_db, config, deadline, None)
+    layout_impl(seed, color_db, config, deadline, None, None)
 }
 
 fn layout_impl(
@@ -2515,6 +2528,7 @@ fn layout_impl(
     config: &Config,
     deadline: Option<Instant>,
     max_points: Option<usize>,
+    cancel: Option<&AtomicBool>,
 ) -> Option<LayoutSummary> {
     let traits = Traits::from_seed(seed);
     let mut rng = Rng::from_seed(&seed[..]);
@@ -2553,6 +2567,7 @@ fn layout_impl(
         &mut rng,
         deadline,
         max_points,
+        cancel,
     )?;
     let num_points = points.0.len();
     let mut ring_counts_used = BTreeMap::new();

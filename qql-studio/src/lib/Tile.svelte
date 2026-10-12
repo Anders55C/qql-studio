@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { type Candidate } from './api';
 	import { onMount } from 'svelte';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { queuedRenderSeed, StaleRenderError } from './renderQueue';
 
 	type Props = {
@@ -36,6 +37,20 @@
 		} finally {
 			savingFavorite = false;
 		}
+	}
+
+	let copied = $state<'' | 'ok' | 'failed'>('');
+	async function copySeed() {
+		try {
+			await navigator.clipboard.writeText(candidate.seed);
+			copied = 'ok';
+		} catch {
+			copied = 'failed';
+		}
+		setTimeout(() => (copied = ''), 1200);
+	}
+	function openOnQql() {
+		openUrl(`https://qql.art/token/${candidate.seed}`).catch(() => {});
 	}
 
 	async function load() {
@@ -102,8 +117,11 @@
 		</button>
 	</div>
 	<div class="meta">
-		<div class="seed" title={candidate.seed}>
-			{candidate.seed.slice(0, 10)}…{candidate.seed.slice(-6)}
+		<div class="seed-row">
+			<button class="seed" title="Copy {candidate.seed}" onclick={copySeed}>
+				{copied === 'ok' ? 'copied ✓' : copied === 'failed' ? 'copy failed' : `${candidate.seed.slice(0, 10)}…${candidate.seed.slice(-6)}`}
+			</button>
+			<button class="qql-link" title="Open on qql.art" onclick={openOnQql}>↗</button>
 		</div>
 		<div class="traits">
 			<span>{candidate.traits.colorPalette}</span>
@@ -231,9 +249,25 @@
 		gap: 2px;
 		color: #ccc;
 	}
-	.seed {
+	.seed-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.seed,
+	.qql-link {
+		all: unset;
+		cursor: pointer;
 		font-family: ui-monospace, SFMono-Regular, monospace;
 		color: #aaa;
+	}
+	.seed:hover,
+	.qql-link:hover {
+		color: #fff;
+	}
+	.qql-link {
+		margin-left: auto;
+		padding: 0 2px;
 	}
 	.traits {
 		display: flex;

@@ -213,6 +213,8 @@ export type GenerateProgress = {
 	found: number;
 	maxAttempts: number;
 	want: number;
+	/** Attempts abandoned at the layout timeout. */
+	timedOut: number;
 };
 
 export type GenerateOutcome = {
@@ -220,10 +222,14 @@ export type GenerateOutcome = {
 	attempts: number;
 	maxAttempts: number;
 	cancelled: boolean;
+	/** How many attempts were abandoned at the layout timeout. */
+	timedOut: number;
 };
 
 export const listTraits = () => invoke<TraitMeta[]>('list_traits');
 export const sessionId = () => invoke<string>('session_id');
+export const listFavorites = (folder: string) =>
+	invoke<string[]>('list_favorites', { folder });
 export const listPaletteColors = () =>
 	invoke<PaletteColors[]>('list_palette_colors');
 export const decodeSeed = (seedHex: string) =>

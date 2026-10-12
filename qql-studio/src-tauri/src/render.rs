@@ -245,15 +245,18 @@ pub fn layout_only(seed: &[u8; 32]) -> LayoutStats {
 
 /// Like [`layout_only`] but returns `None` when the layout takes longer than
 /// the supplied deadline, or as soon as it has placed more than `max_points`
-/// points. Used by the bulk-search loop to skip dense outliers and to reject
-/// over-budget seeds without finishing their layout.
+/// points, or when `cancel` is set. Used by the bulk-search loop to skip dense
+/// outliers, reject over-budget seeds without finishing their layout, and
+/// stop promptly on Cancel.
 pub fn layout_only_with_limits(
     seed: &[u8; 32],
     deadline: Option<Instant>,
     max_points: Option<usize>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Option<LayoutStats> {
     let cfg = Config::default();
-    let summary = art::layout_with_limits(seed, color_db(), &cfg, deadline, max_points)?;
+    let summary =
+        art::layout_with_limits(seed, color_db(), &cfg, deadline, max_points, cancel)?;
     Some(summary_to_stats(&summary))
 }
 
