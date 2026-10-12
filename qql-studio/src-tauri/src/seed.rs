@@ -311,6 +311,14 @@ pub fn resolve_choices<R: Rng + ?Sized>(
     let mut bullseye1 = bull(&choices.bullseye1, rng);
     let mut bullseye3 = bull(&choices.bullseye3, rng);
     let mut bullseye7 = bull(&choices.bullseye7, rng);
+    // Like qql.art: if the coin flips leave every ring count off, turn the
+    // ones left to chance back on, so the 2-ring fallback only happens when
+    // it's asked for (explicit choices are kept as chosen).
+    if choices.bullseye2.is_none() && !bullseye1 && !bullseye3 && !bullseye7 {
+        bullseye1 |= choices.bullseye1.is_none();
+        bullseye3 |= choices.bullseye3.is_none();
+        bullseye7 |= choices.bullseye7.is_none();
+    }
     // Apply the "bullseye 2" derived constraint:
     //   Some(true)  → all three of 1/3/7 forced off so the algorithm falls
     //                 back to 2-ring bullseyes.
@@ -536,6 +544,43 @@ pub fn trait_metadata() -> Vec<TraitMeta> {
 mod tests {
     use super::*;
     use hex_literal::hex;
+
+    /// Traits left on "Any" follow qql.art's odds: Turbulence None ~20% (it was
+    /// never picked before), and ringdots never land on all-off by chance.
+    #[test]
+    fn any_traits_follow_qql_art_odds() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+        let choices = TraitChoices::default();
+        let n = 20_000;
+        let (mut none_turb, mut all_off, mut all_on) = (0, 0, 0);
+        for _ in 0..n {
+            let r = resolve_choices(&choices, &mut rng).unwrap();
+            if matches!(r.turbulence, q::Turbulence::None) {
+                none_turb += 1;
+            }
+            match (r.bullseye1, r.bullseye3, r.bullseye7) {
+                (false, false, false) => all_off += 1,
+                (true, true, true) => all_on += 1,
+                _ => {}
+            }
+        }
+        let frac = |k: i32| k as f64 / n as f64;
+        assert!((frac(none_turb) - 0.2).abs() < 0.015, "turbulence None {}", frac(none_turb));
+        assert_eq!(all_off, 0);
+        assert!((frac(all_on) - 0.25).abs() < 0.015, "all rings on {}", frac(all_on));
+
+        // Explicit choices are kept: 1 and 3 off, 7 left to chance -> 7 always on.
+        let choices = TraitChoices {
+            bullseye1: Some(false),
+            bullseye3: Some(false),
+            ..TraitChoices::default()
+        };
+        for _ in 0..200 {
+            let r = resolve_choices(&choices, &mut rng).unwrap();
+            assert!(!r.bullseye1 && !r.bullseye3 && r.bullseye7);
+        }
+    }
 
     /// Round-trip: build a seed from the canonical QQL #219 trait selections and
     /// verify the trait-encoding portion matches.

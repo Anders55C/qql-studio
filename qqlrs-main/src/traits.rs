@@ -105,8 +105,10 @@ trait_enum!(FlowField {
     RandomRadial(1),
 });
 
+// Weights match qql.art's own trait code (qql-traits `ALL_TRAITS`), used when
+// a trait is left to chance. They don't affect decoding a seed.
 trait_enum!(Turbulence {
-    None(0),
+    None(1),
     Low(3),
     High(1),
 });
