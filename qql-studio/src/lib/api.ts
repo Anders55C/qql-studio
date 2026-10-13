@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 export type TraitChoices = {
 	flowField: string | null;
@@ -256,6 +256,8 @@ export const exportSeedPng = (seed: string, width: number, path: string, inflate
 export type AnimationProgress = { done: number; total: number; phase: string };
 // `numPoints`, when already known from layout stats, saves the backend a full
 // (possibly slow) layout pass it would otherwise run just to count points.
+// The backend writes the frames into its cache and returns their paths;
+// this hands back URLs the page can load them from.
 export const animationPreview = (
 	seed: string,
 	width: number,
@@ -267,7 +269,7 @@ export const animationPreview = (
 		width,
 		frames,
 		numPoints: numPoints ?? null
-	});
+	}).then((paths) => paths.map((p) => convertFileSrc(p)));
 export const exportAnimation = (
 	seed: string,
 	width: number,

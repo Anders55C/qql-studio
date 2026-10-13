@@ -462,14 +462,35 @@ fn drawtarget_to_png_bytes(dt: &raqote::DrawTarget) -> Result<Vec<u8>> {
 /// exists only to size the frame step — on slow seeds that's nearly half the
 /// total time. `draw()` recomputes the real layout either way, so a stale or
 /// slightly-off count only shifts the frame pacing, never the output.
+#[cfg(test)]
 pub fn render_animation_frames(
+    seed: &[u8; 32],
+    width: i32,
+    target_frames: usize,
+    known_num_points: Option<usize>,
+    on_progress: impl FnMut(usize, usize),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Vec<u8>>> {
+    let mut frames = Vec::new();
+    render_animation_streaming(seed, width, target_frames, known_num_points, on_progress, cancel, |png| {
+        frames.push(png);
+        Ok(())
+    })?;
+    Ok(frames)
+}
+
+/// Render an animation, handing each frame's PNG to `sink` as soon as it's
+/// drawn instead of collecting them, so callers can write frames to disk and
+/// keep memory flat however many frames there are. Returns the frame count.
+pub fn render_animation_streaming(
     seed: &[u8; 32],
     width: i32,
     target_frames: usize,
     known_num_points: Option<usize>,
     mut on_progress: impl FnMut(usize, usize),
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<Vec<Vec<u8>>> {
+    mut sink: impl FnMut(Vec<u8>) -> Result<()>,
+) -> Result<usize> {
     use std::sync::atomic::Ordering;
     let num_points = match known_num_points {
         Some(n) if n > 0 => n,
@@ -487,77 +508,123 @@ pub fn render_animation_frames(
         chunks: chunks.parse().unwrap(),
         ..Config::default()
     };
-    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut count = 0usize;
     let mut cancelled = false;
+    let mut failure: Option<anyhow::Error> = None;
     art::draw(seed, color_db(), &cfg, width, |frame| {
-        if cancelled || cancel.load(Ordering::Relaxed) {
-            cancelled = true;
+        if cancelled || failure.is_some() || cancel.load(Ordering::Relaxed) {
+            cancelled = failure.is_none();
             return;
         }
-        if let Ok(png) = drawtarget_to_png_bytes(frame.dt) {
-            frames.push(png);
-            on_progress(frames.len(), total_est);
+        let result = drawtarget_to_png_bytes(frame.dt).and_then(&mut sink);
+        match result {
+            Ok(()) => {
+                count += 1;
+                on_progress(count, total_est);
+            }
+            Err(e) => failure = Some(e.context(format!("frame {}", count + 1))),
         }
     });
+    if let Some(e) = failure {
+        return Err(e);
+    }
     if cancelled {
         anyhow::bail!("cancelled");
     }
-    Ok(frames)
+    Ok(count)
 }
 
-/// Encode a sequence of PNG frames into an animated PNG (APNG). Full color,
-/// lossless, loops forever. `delay_ms` is the per-frame delay; the final frame
-/// is held for `hold_ms` if that's longer. Frames are decoded one at a time to
-/// keep peak memory low.
+/// Encode a sequence of PNG frames into an animated PNG (APNG) in memory.
+/// Full color, lossless, loops forever. `delay_ms` is the per-frame delay; the
+/// final frame is held for `hold_ms` if that's longer.
+#[cfg(test)]
 pub fn encode_apng(frames: &[Vec<u8>], delay_ms: u16, hold_ms: u16) -> Result<Vec<u8>> {
-    if frames.is_empty() {
-        anyhow::bail!("no frames to encode");
-    }
-    let first = image::load_from_memory(&frames[0])
-        .context("decoding first frame")?
-        .to_rgba8();
-    let (w, h) = (first.width(), first.height());
     let mut out = Cursor::new(Vec::<u8>::new());
-    {
-        let mut enc = png::Encoder::new(&mut out, w, h);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.set_animated(frames.len() as u32, 0)
-            .context("set_animated")?;
-        enc.set_frame_delay(delay_ms, 1000).context("set_frame_delay")?;
-        let mut writer = enc.write_header().context("apng write_header")?;
-        for (i, f) in frames.iter().enumerate() {
-            let rgba = if i == 0 {
-                first.as_raw().clone()
-            } else {
-                image::load_from_memory(f)
-                    .with_context(|| format!("decoding frame {i}"))?
-                    .to_rgba8()
-                    .into_raw()
-            };
-            if i + 1 == frames.len() && hold_ms > delay_ms {
-                writer
-                    .set_frame_delay(hold_ms, 1000)
-                    .context("final frame hold")?;
-            }
-            writer
-                .write_image_data(&rgba)
-                .with_context(|| format!("writing apng frame {i}"))?;
-        }
-        writer.finish().context("apng finish")?;
-    }
+    encode_apng_into(&mut out, frames.len(), |i| Ok(frames[i].clone()), delay_ms, hold_ms)?;
     Ok(out.into_inner())
 }
 
-/// Wrap raw PNG bytes as a base64 data URL (for sending frames to the webview
-/// animation player).
-pub fn png_to_data_url(png: &[u8]) -> String {
-    format!("data:image/png;base64,{}", B64.encode(png))
+/// Like [`encode_apng`], but reads the frames from PNG files and streams the
+/// result to `dest`, so only one frame is in memory at a time.
+pub fn encode_apng_files(
+    frames: &[std::path::PathBuf],
+    dest: &std::path::Path,
+    delay_ms: u16,
+    hold_ms: u16,
+) -> Result<()> {
+    let file = std::fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let mut out = std::io::BufWriter::new(file);
+    encode_apng_into(
+        &mut out,
+        frames.len(),
+        |i| std::fs::read(&frames[i]).with_context(|| format!("reading {}", frames[i].display())),
+        delay_ms,
+        hold_ms,
+    )?;
+    use std::io::Write;
+    out.flush().with_context(|| format!("writing {}", dest.display()))
+}
+
+fn encode_apng_into<W: std::io::Write>(
+    out: W,
+    n: usize,
+    mut frame_png: impl FnMut(usize) -> Result<Vec<u8>>,
+    delay_ms: u16,
+    hold_ms: u16,
+) -> Result<()> {
+    if n == 0 {
+        anyhow::bail!("no frames to encode");
+    }
+    let first = image::load_from_memory(&frame_png(0)?)
+        .context("decoding first frame")?
+        .to_rgba8();
+    let (w, h) = (first.width(), first.height());
+    let mut enc = png::Encoder::new(out, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_animated(n as u32, 0).context("set_animated")?;
+    enc.set_frame_delay(delay_ms, 1000).context("set_frame_delay")?;
+    let mut writer = enc.write_header().context("apng write_header")?;
+    let mut first = Some(first.into_raw());
+    for i in 0..n {
+        let rgba = match first.take() {
+            Some(raw) => raw,
+            None => image::load_from_memory(&frame_png(i)?)
+                .with_context(|| format!("decoding frame {i}"))?
+                .to_rgba8()
+                .into_raw(),
+        };
+        if i + 1 == n && hold_ms > delay_ms {
+            writer.set_frame_delay(hold_ms, 1000).context("final frame hold")?;
+        }
+        writer
+            .write_image_data(&rgba)
+            .with_context(|| format!("writing apng frame {i}"))?;
+    }
+    writer.finish().context("apng finish")?;
+    Ok(())
+}
+
+/// File name of the `i`th (0-based) frame in a frame folder.
+pub fn frame_name(i: usize) -> String {
+    format!("frame_{:04}.png", i + 1)
 }
 
 /// Write a sequence of PNG frames as numbered files into `dir` (created if
-/// needed). Returns the directory path.
+/// needed).
+#[cfg(test)]
 pub fn write_frame_sequence(frames: &[Vec<u8>], dir: &std::path::Path) -> Result<()> {
+    prepare_frame_dir(dir)?;
+    for (i, f) in frames.iter().enumerate() {
+        let name = frame_name(i);
+        std::fs::write(dir.join(&name), f).with_context(|| format!("writing {name}"))?;
+    }
+    Ok(())
+}
+
+/// Create `dir` if needed and remove any `frame_*.png` from an earlier
+/// export (other files are left alone).
+pub fn prepare_frame_dir(dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     // Clear frames from an earlier export into the same folder; a shorter
     // sequence would otherwise leave stale higher-numbered frames behind.
@@ -570,10 +637,6 @@ pub fn write_frame_sequence(frames: &[Vec<u8>], dir: &std::path::Path) -> Result
         if is_frame {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
-    }
-    for (i, f) in frames.iter().enumerate() {
-        let name = format!("frame_{:04}.png", i + 1);
-        std::fs::write(dir.join(&name), f).with_context(|| format!("writing {name}"))?;
     }
     Ok(())
 }

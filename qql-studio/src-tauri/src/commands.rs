@@ -1240,6 +1240,12 @@ pub async fn render_seed(
 /// served to the page as files (asset protocol) instead of base64 strings, so
 /// the webview holds only a path per tile and can free and reload the images.
 static THUMB_DIR: once_cell::sync::OnceCell<std::path::PathBuf> = once_cell::sync::OnceCell::new();
+/// Folder for animation frames (inspector previews and exports in progress),
+/// also under the app cache, for the same reason as thumbnails.
+static ANIM_DIR: once_cell::sync::OnceCell<std::path::PathBuf> = once_cell::sync::OnceCell::new();
+/// Gives each preview / export its own subfolder, so a new preview never
+/// reuses an earlier one's file URLs (which the webview may have cached).
+static ANIM_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Create an empty thumbnail cache at launch. Starting empty keeps it from
 /// growing across sessions; within a session it lets a reloaded view (see the
@@ -1254,6 +1260,69 @@ pub fn init_thumb_cache(app: &AppHandle) {
     if std::fs::create_dir_all(&dir).is_ok() {
         let _ = THUMB_DIR.set(dir);
     }
+    let anim = base.join("anim");
+    let _ = std::fs::remove_dir_all(&anim);
+    if std::fs::create_dir_all(&anim).is_ok() {
+        let _ = ANIM_DIR.set(anim);
+    }
+}
+
+/// A fresh, empty subfolder of the animation cache. Earlier folders of the
+/// same kind are removed first (only the current preview is ever shown);
+/// other kinds are left alone, so an export never deletes the preview that's
+/// playing.
+fn new_anim_dir(kind: &str) -> Result<std::path::PathBuf, String> {
+    let base = ANIM_DIR.get().ok_or("animation cache unavailable")?;
+    let prefix = format!("{kind}-");
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let dir = base.join(format!("{kind}-{}", ANIM_SEQ.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Render an animation straight into `dir` as numbered frame files, returning
+/// their paths in order. Only one frame is in memory at a time.
+fn render_frames_to_dir(
+    app: &AppHandle,
+    seed: &[u8; 32],
+    width: i32,
+    frames: usize,
+    num_points: Option<usize>,
+    dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut paths = Vec::new();
+    render::render_animation_streaming(
+        seed,
+        width,
+        frames,
+        num_points,
+        |done, total| {
+            let _ = app.emit(
+                "animation-progress",
+                AnimationProgress {
+                    done,
+                    total,
+                    phase: "rendering".into(),
+                },
+            );
+        },
+        &CANCEL_ANIM,
+        |png| {
+            let path = dir.join(render::frame_name(paths.len()));
+            std::fs::write(&path, &png)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            paths.push(path);
+            Ok(())
+        },
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    Ok(paths)
 }
 
 /// Empty the thumbnail cache. Called when a new search starts: the grid only
@@ -1398,8 +1467,10 @@ pub fn cancel_animation() {
     CANCEL_ANIM.store(true, Ordering::SeqCst);
 }
 
-/// Render an animation and return the frames as PNG data URLs for the in-app
-/// player. Width is capped to a preview-friendly size. `num_points` is the
+/// Render an animation for the in-app player and return the frame file paths
+/// (in the animation cache; the page loads them as files, so long previews
+/// don't pile up as image data in the webview). Width is capped to a
+/// preview-friendly size. `num_points` is the
 /// already-known layout point count, if the frontend has stats (saves a
 /// layout pass that would otherwise run just to size the frame step).
 #[tauri::command]
@@ -1414,26 +1485,9 @@ pub async fn animation_preview(
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 1280);
-        let app2 = app.clone();
-        let pngs = render::render_animation_frames(
-            &bytes,
-            w,
-            frames,
-            num_points,
-            |done, total| {
-                let _ = app2.emit(
-                    "animation-progress",
-                    AnimationProgress {
-                        done,
-                        total,
-                        phase: "rendering".into(),
-                    },
-                );
-            },
-            &CANCEL_ANIM,
-        )
-        .map_err(|e| format!("{e:#}"))?;
-        Ok(pngs.iter().map(|p| render::png_to_data_url(p)).collect())
+        let dir = new_anim_dir("preview")?;
+        let paths = render_frames_to_dir(&app, &bytes, w, frames, num_points, &dir)?;
+        Ok(paths.iter().map(|p| p.to_string_lossy().into_owned()).collect())
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
@@ -1459,44 +1513,36 @@ pub async fn export_animation(
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 4800);
-        let app2 = app.clone();
-        let pngs = render::render_animation_frames(
-            &bytes,
-            w,
-            frames,
-            num_points,
-            |done, total| {
-                let _ = app2.emit(
-                    "animation-progress",
-                    AnimationProgress {
-                        done,
-                        total,
-                        phase: "rendering".into(),
-                    },
-                );
-            },
-            &CANCEL_ANIM,
-        )
-        .map_err(|e| format!("{e:#}"))?;
-        let n = pngs.len();
-        let _ = app.emit(
-            "animation-progress",
-            AnimationProgress {
-                done: n,
-                total: n,
-                phase: "encoding".into(),
-            },
-        );
+        // Frames go to disk as they're drawn (straight into the destination
+        // for a frame folder, via a scratch folder for an APNG), so memory
+        // stays flat however long the animation is.
+        let encoding = |n: usize| {
+            let _ = app.emit(
+                "animation-progress",
+                AnimationProgress {
+                    done: n,
+                    total: n,
+                    phase: "encoding".into(),
+                },
+            );
+        };
         match format.as_str() {
             "apng" => {
-                let data =
-                    render::encode_apng(&pngs, delay_ms, hold_ms).map_err(|e| format!("{e:#}"))?;
-                std::fs::write(&dest, &data).map_err(|e| format!("write failed: {e}"))?;
-                Ok(dest)
+                let scratch = new_anim_dir("export")?;
+                let result = (|| {
+                    let paths = render_frames_to_dir(&app, &bytes, w, frames, num_points, &scratch)?;
+                    encoding(paths.len());
+                    render::encode_apng_files(&paths, std::path::Path::new(&dest), delay_ms, hold_ms)
+                        .map_err(|e| format!("{e:#}"))
+                })();
+                let _ = std::fs::remove_dir_all(&scratch);
+                result.map(|()| dest)
             }
             "frames" => {
                 let dir = std::path::Path::new(&dest);
-                render::write_frame_sequence(&pngs, dir).map_err(|e| format!("{e:#}"))?;
+                render::prepare_frame_dir(dir).map_err(|e| format!("{e:#}"))?;
+                let paths = render_frames_to_dir(&app, &bytes, w, frames, num_points, dir)?;
+                encoding(paths.len());
                 Ok(dir.to_string_lossy().into_owned())
             }
             other => Err(format!("unknown format: {other}")),
@@ -2043,6 +2089,52 @@ mod tests {
         clear_thumb_cache();
         assert!(dir.is_dir());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn streamed_animation_export_matches_in_memory() {
+        let seed: [u8; 32] =
+            hex::decode("f30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let cancel = AtomicBool::new(false);
+        let in_memory = render::render_animation_frames(&seed, 160, 12, None, |_, _| {}, &cancel).unwrap();
+        let expected = render::encode_apng(&in_memory, 50, 500).unwrap();
+
+        // Streamed: frames written to a folder as drawn, then encoded from disk.
+        let dir = scratch_dir("anim-stream");
+        let mut paths = Vec::new();
+        let n = render::render_animation_streaming(&seed, 160, 12, None, |_, _| {}, &cancel, |png| {
+            let p = dir.join(render::frame_name(paths.len()));
+            std::fs::write(&p, png)?;
+            paths.push(p);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, in_memory.len());
+        let out = dir.join("out.png");
+        render::encode_apng_files(&paths, &out, 50, 500).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), expected, "streamed APNG differs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_animation_folder_replaces_the_previous_one() {
+        let base = scratch_dir("anim-cache");
+        let _ = ANIM_DIR.set(base.clone());
+        let base = ANIM_DIR.get().unwrap().clone();
+        let a = new_anim_dir("preview").unwrap();
+        std::fs::write(a.join(render::frame_name(0)), b"x").unwrap();
+        let b = new_anim_dir("preview").unwrap();
+        assert_ne!(a, b, "each preview gets its own folder");
+        assert!(!a.exists(), "the earlier preview is removed");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 1);
+        // Starting an export must not touch the preview that's playing.
+        std::fs::write(b.join(render::frame_name(0)), b"x").unwrap();
+        let e = new_anim_dir("export").unwrap();
+        assert!(b.join(render::frame_name(0)).exists(), "export deleted the preview");
+        assert!(e.exists());
     }
 
     #[test]

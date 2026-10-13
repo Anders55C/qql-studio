@@ -189,6 +189,9 @@
 		frames = null;
 		frameIdx = 0;
 		try {
+			// Frame URLs point at files in the app cache (just written, so
+			// they load quickly); nothing is preloaded, which would decode every
+			// frame at once and defeat the point.
 			frames = await animationPreview(
 				candidate.seed,
 				animSize,
