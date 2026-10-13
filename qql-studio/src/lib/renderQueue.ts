@@ -9,7 +9,7 @@
 // resolve in roughly the same order — you see the grid fill in waves of N
 // instead of a random pop-corn pattern.
 
-import { renderSeed, type RenderResult } from './api';
+import { renderSeed, renderThumbnail, type RenderResult } from './api';
 
 let maxConcurrent = 8;
 let active = 0;
@@ -59,6 +59,16 @@ function acquire(): Promise<void> {
 function release() {
 	active = Math.max(0, active - 1);
 	pump();
+}
+
+/** Queued thumbnail render into the disk cache; resolves to the file path. */
+export async function queuedRenderThumbnail(seedHex: string, width: number): Promise<string> {
+	await acquire();
+	try {
+		return await renderThumbnail(seedHex, width);
+	} finally {
+		release();
+	}
 }
 
 export async function queuedRenderSeed(

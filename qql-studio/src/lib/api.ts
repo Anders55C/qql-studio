@@ -241,6 +241,9 @@ export const generateCandidates = (request: GenerateRequest) =>
 export const cancelSearch = () => invoke<void>('cancel_search');
 // `inflate` maps to qqlrs' inflate_draw_radius: give every point a small minimum
 // radius so near-invisible dots get painted. Paint-time only — layout unchanged.
+/** Render a thumbnail into the on-disk cache; returns its file path. */
+export const renderThumbnail = (seedHex: string, width: number) =>
+	invoke<string>('render_thumbnail', { seedHex, width });
 export const renderSeed = (seedHex: string, width: number, inflate = false) =>
 	invoke<RenderResult>('render_seed', { seedHex, width, inflate });
 export const saveSeedPng = (seed: string, width: number, folder: string) =>

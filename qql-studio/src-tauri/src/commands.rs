@@ -809,6 +809,7 @@ pub async fn generate_candidates(
     request: GenerateRequest,
 ) -> Result<GenerateOutcome, String> {
     CANCEL.store(false, Ordering::SeqCst);
+    clear_thumb_cache();
     let app_clone = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         generate_candidates_inner(request, move |progress| {
@@ -1230,6 +1231,64 @@ pub async fn render_seed(
         let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
         let w = width.clamp(64, 9600);
         render::render(&bytes, w, inflate.unwrap_or(false)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("worker join error: {e}"))?
+}
+
+/// Folder for thumbnail PNGs, under the app's cache directory. Thumbnails are
+/// served to the page as files (asset protocol) instead of base64 strings, so
+/// the webview holds only a path per tile and can free and reload the images.
+static THUMB_DIR: once_cell::sync::OnceCell<std::path::PathBuf> = once_cell::sync::OnceCell::new();
+
+/// Create an empty thumbnail cache at launch. Starting empty keeps it from
+/// growing across sessions; within a session it lets a reloaded view (see the
+/// page's result restore) show its tiles again instantly.
+pub fn init_thumb_cache(app: &AppHandle) {
+    use tauri::Manager;
+    let Ok(base) = app.path().app_cache_dir() else {
+        return;
+    };
+    let dir = base.join("thumbs");
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = THUMB_DIR.set(dir);
+    }
+}
+
+/// Empty the thumbnail cache. Called when a new search starts: the grid only
+/// ever shows the current search, and a reloaded view only restores that
+/// one, so older thumbnails are never needed again.
+fn clear_thumb_cache() {
+    let Some(dir) = THUMB_DIR.get() else {
+        return;
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Render a seed's thumbnail into the cache (once per seed and width) and
+/// return the file path for the page to load.
+#[tauri::command]
+pub async fn render_thumbnail(seed_hex: String, width: i32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = THUMB_DIR.get().ok_or("thumbnail cache unavailable")?;
+        let bytes = parse_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
+        let w = width.clamp(64, 9600);
+        let path = dir.join(format!("{}_{w}.png", seed_to_hex(&bytes)));
+        if !path.exists() {
+            let png = render::render_png_bytes(&bytes, w, false).map_err(|e| format!("{e:#}"))?;
+            // Write then rename, so a half-written file is never served.
+            let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&tmp, &png)
+                .map_err(|e| format!("write failed ({}): {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &path)
+                .map_err(|e| format!("write failed ({}): {e}", path.display()))?;
+        }
+        Ok(path.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| format!("worker join error: {e}"))?
@@ -1959,6 +2018,31 @@ mod tests {
         .unwrap();
         let finals: Vec<String> = outcome.candidates.iter().map(|c| c.seed.clone()).collect();
         assert_eq!(*streamed.lock().unwrap(), finals);
+    }
+
+    #[test]
+    fn thumbnails_render_once_into_the_cache() {
+        let dir = scratch_dir("thumbs");
+        let _ = THUMB_DIR.set(dir.clone());
+        let dir = THUMB_DIR.get().unwrap().clone();
+        let seed = "0xF30939AD9A36287DC1CEBD9B784067927E7713429461DC01D066FFFF10810307";
+        let t = std::time::Instant::now();
+        let path = tauri::async_runtime::block_on(render_thumbnail(seed.into(), 120)).unwrap();
+        let first = t.elapsed();
+        assert!(path.ends_with("0xf30939ad9a36287dc1cebd9b784067927e7713429461dc01d066ffff10810307_120.png"));
+        assert!(path.starts_with(&*dir.to_string_lossy()));
+        let png = std::fs::read(&path).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        // Second call is a cache hit: same path, no re-render.
+        let t = std::time::Instant::now();
+        let again = tauri::async_runtime::block_on(render_thumbnail(seed.to_lowercase(), 120)).unwrap();
+        assert_eq!(again, path);
+        assert!(t.elapsed() < first / 5, "cache hit took {:?} vs {:?}", t.elapsed(), first);
+        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        // A new search empties the cache (the folder itself stays).
+        clear_thumb_cache();
+        assert!(dir.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     }
 
     #[test]

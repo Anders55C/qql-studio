@@ -7,6 +7,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            commands::init_thumb_cache(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_traits,
             commands::list_palette_colors,
@@ -24,6 +28,7 @@ pub fn run() {
             commands::random_seed_for_address,
             commands::session_id,
             commands::list_favorites,
+            commands::render_thumbnail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

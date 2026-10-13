@@ -2,7 +2,8 @@
 	import { type Candidate } from './api';
 	import { onMount } from 'svelte';
 	import { openUrl } from '@tauri-apps/plugin-opener';
-	import { queuedRenderSeed, StaleRenderError } from './renderQueue';
+	import { convertFileSrc } from '@tauri-apps/api/core';
+	import { queuedRenderThumbnail, StaleRenderError } from './renderQueue';
 
 	type Props = {
 		candidate: Candidate;
@@ -21,6 +22,9 @@
 		onToggleFavorite
 	}: Props = $props();
 
+	// The thumbnail's URL: a file in the app's cache rather than inline image
+	// data, so the webview holds a short path per tile and can free and
+	// re-decode the images itself under memory pressure.
 	let pngUrl = $state<string | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
@@ -58,8 +62,8 @@
 		loading = true;
 		error = null;
 		try {
-			const r = await queuedRenderSeed(candidate.seed, thumbWidth);
-			pngUrl = r.pngDataUrl;
+			const path = await queuedRenderThumbnail(candidate.seed, thumbWidth);
+			pngUrl = convertFileSrc(path);
 			if (!reported) {
 				reported = true;
 				onRendered?.(true);
