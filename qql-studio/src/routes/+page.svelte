@@ -1173,7 +1173,7 @@
 
 		<section class="group group-traits">
 			<div class="section-head">
-				<h2>Traits</h2>
+				<h2>Traits{@render traitsInfo()}</h2>
 				<button class="ghost" onclick={resetTraits}>reset</button>
 			</div>
 			<div class="grid">
@@ -1226,200 +1226,10 @@
 			<button class="ghost" onclick={resetAllFilters}>Reset all filters</button>
 		</div>
 
-		<section class="group group-layout">
-			<div class="section-head">
-				<h2>Characteristics</h2>
-				<small class="hint">requires layout</small>
-			</div>
-			<div class="char-grid">
-				<label class="block">
-					<span class="label">Min points</span>
-					<input type="number" bind:value={minPoints} placeholder="—" min="0" />
-				</label>
-				<label class="block">
-					<span class="label">Max points</span>
-					<input type="number" bind:value={maxPoints} placeholder="—" min="0" />
-				</label>
-				<label class="block">
-					<span class="label">Min colors</span>
-					<input type="number" bind:value={minColors} placeholder="—" min="1" max="16" />
-				</label>
-				<label class="block">
-					<span class="label">Max colors</span>
-					<input type="number" bind:value={maxColors} placeholder="—" min="1" max="16" />
-				</label>
-			</div>
-			<label class="checkbox">
-				<input type="checkbox" bind:checked={runLayout} />
-				<span>Always run layout (show points/colors per tile)</span>
-			</label>
-		</section>
-
-		<section class="group group-layout">
-			<div class="section-head">
-				<h2>Radius buckets</h2>
-				<small class="hint">requires layout</small>
-			</div>
-			<div class="bucket-row">
-				<div class="bucket-label">
-					<strong>Small</strong>
-					<small>≤ 1.2% canvas</small>
-				</div>
-				<input
-					type="number"
-					bind:value={minSmall}
-					placeholder="min"
-					min="0"
-				/>
-				<input
-					type="number"
-					bind:value={maxSmall}
-					placeholder="max"
-					min="0"
-				/>
-			</div>
-			<div class="bucket-row">
-				<div class="bucket-label">
-					<strong>Medium</strong>
-					<small>1.2 – 3% canvas</small>
-				</div>
-				<input
-					type="number"
-					bind:value={minMedium}
-					placeholder="min"
-					min="0"
-				/>
-				<input
-					type="number"
-					bind:value={maxMedium}
-					placeholder="max"
-					min="0"
-				/>
-			</div>
-			<div class="bucket-row">
-				<div class="bucket-label">
-					<strong>Large</strong>
-					<small>&gt; 3% canvas</small>
-				</div>
-				<input
-					type="number"
-					bind:value={minLarge}
-					placeholder="min"
-					min="0"
-				/>
-				<input
-					type="number"
-					bind:value={maxLarge}
-					placeholder="max"
-					min="0"
-				/>
-			</div>
-		</section>
-
-		<section class="group group-colors">
-			<div class="section-head">
-				<h2>Colors</h2>
-				<small class="hint">ring colors need layout</small>
-			</div>
-
-			<div class="subhead">Background <small>fast</small></div>
-			{#each backgroundGroups as group (group.palette)}
-				{#if !choices.colorPalette}
-					<div class="bg-group-label">{group.palette}</div>
-				{/if}
-				<div class="color-chips-grid">
-					{#each group.backgrounds as c (c.name)}
-						<button
-							type="button"
-							class="chip-button"
-							class:selected={backgroundColors.includes(c.name)}
-							onclick={() => toggleBackground(c.name)}
-							title="{c.name} — picked for {oddsPct(c.odds)} of {group.palette} seeds"
-						>
-							<span class="swatch" style="background:{c.swatch}"></span>
-							<span class="chip-name">{shortBgName(group.palette, c.name)}</span>
-							<span class="chip-odds">{oddsPct(c.odds)}</span>
-						</button>
-					{/each}
-				</div>
-			{/each}
-			{#if activeBackgrounds.length > 0}
-				<button class="ghost" onclick={() => (backgroundColors = [])}>
-					clear backgrounds ({activeBackgrounds.length})
-				</button>
-			{:else}
-				<small class="bg-hint">none selected = any background · % = how often it's picked in its palette</small>
-			{/if}
-
-			<div class="subhead">Ring colors</div>
-			<div class="color-chips-grid">
-				{#each visiblePrimaries as c}
-					<button
-						type="button"
-						class="chip-button"
-						class:selected={ringColors.includes(c.name)}
-						onclick={() => toggleRingColor(c.name)}
-					>
-						<span class="swatch" style="background:{c.swatch}"></span>
-						<span class="chip-name">{c.name}</span>
-					</button>
-				{/each}
-			</div>
-			{#if activeRingColors.length > 0}
-				<label class="checkbox">
-					<input type="checkbox" bind:checked={exactRingColors} />
-					<span>Only these colors (exclude seeds using others)</span>
-				</label>
-				<button
-					class="ghost"
-					onclick={() => {
-						ringColors = [];
-						exactRingColors = false;
-					}}
-				>
-					clear ring colors
-				</button>
-			{/if}
-
-			<div class="subhead">Splatter <small>fast</small></div>
-			<label class="block">
-				<select bind:value={splatterMode}>
-					<option value="">Any</option>
-					<option value="none">None (no splatter at all)</option>
-					<option value="any">Has splatter (odds &gt; 0)</option>
-					<option value="light">Light only (≤ 0.005)</option>
-					<option value="moderate">Moderate+ (≥ 0.01)</option>
-					<option value="heavy">Heavy+ (≥ 0.08)</option>
-				</select>
-			</label>
-			<div class="bucket-row">
-				<div class="bucket-label">
-					<strong>Odds range</strong>
-					<small>0–0.5 · advanced</small>
-				</div>
-				<input
-					type="number"
-					bind:value={minSplatterOdds}
-					placeholder="min"
-					step="0.001"
-					min="0"
-					max="0.5"
-				/>
-				<input
-					type="number"
-					bind:value={maxSplatterOdds}
-					placeholder="max"
-					step="0.001"
-					min="0"
-					max="0.5"
-				/>
-			</div>
-		</section>
-
 		<section class="group group-composition">
 			<div class="section-head">
-				<h2>Composition</h2>
-				<small class="hint">corner concentration needs layout</small>
+				<h2>Flow</h2>
+				<small class="hint fast">fast · no layout</small>
 			</div>
 
 			<fieldset class="struct-group" disabled={!angleApplies}>
@@ -1603,41 +1413,10 @@
 			</div>
 			</fieldset>
 
-			<div class="subhead">Corner concentration</div>
-			<label class="block">
-				<select bind:value={cornerConcentration}>
-					<option value="">Any (no filter)</option>
-					<option value="TL">Top-left densest</option>
-					<option value="TR">Top-right densest</option>
-					<option value="BL">Bottom-left densest</option>
-					<option value="BR">Bottom-right densest</option>
-					<option value="AnyLeft">Densest on left (TL or BL)</option>
-					<option value="AnyRight">Densest on right (TR or BR)</option>
-				</select>
-			</label>
-			{#if cornerConcentration}
-				<label class="block workers-row">
-					<div class="workers-head">
-						<span class="label">Min ratio (densest / sparsest)</span>
-						<span class="workers-value">{cornerRatio.toFixed(2)}×</span>
-					</div>
-					<input
-						type="range"
-						min="1"
-						max="3"
-						step="0.05"
-						bind:value={cornerRatio}
-					/>
-					<div class="workers-hint">
-						1.0 = no gradient required; ~1.5× ≈ moderate; ~2.0× ≈ pronounced
-					</div>
-				</label>
-			{/if}
-
 			<div class="splits-row">
 				<div class="splits-label">
-					<strong>Curve length</strong>
-					<small>applies to all structures · minor effect</small>
+					<strong>Curve length{@render curveLengthInfo()}</strong>
+					<small>steps per flow line · minor effect</small>
 				</div>
 				<div class="splits-checks">
 					<label class="splits-check"><input type="checkbox" bind:checked={cl500} /><span>500</span></label>
@@ -1804,7 +1583,7 @@
 					</label>
 				</div>
 			</div>
-			{#each [{ axis: 'x', name: 'Center X', before: '← off left', after: 'off right →' }, { axis: 'y', name: 'Center Y', before: '↑ above', after: 'below ↓' }] as ax (ax.axis)}
+			{#each [{ axis: 'x', name: 'Ring center X', before: '← off left', after: 'off right →' }, { axis: 'y', name: 'Ring center Y', before: '↑ above', after: 'below ↓' }] as ax (ax.axis)}
 				{@const picked = ax.axis === 'x' ? orbitalCenterX : orbitalCenterY}
 				<div class="center-pos">
 					<div class="splits-label">
@@ -1949,6 +1728,228 @@
 			</label>
 		</fieldset>
 
+		<section class="group group-colors">
+			<div class="section-head">
+				<h2>Colors</h2>
+				<small class="hint">ring colors need layout</small>
+			</div>
+
+			<div class="subhead">Background {@render backgroundInfo()} <small>fast</small></div>
+			{#each backgroundGroups as group (group.palette)}
+				{#if !choices.colorPalette}
+					<div class="bg-group-label">{group.palette}</div>
+				{/if}
+				<div class="color-chips-grid">
+					{#each group.backgrounds as c (c.name)}
+						<button
+							type="button"
+							class="chip-button"
+							class:selected={backgroundColors.includes(c.name)}
+							onclick={() => toggleBackground(c.name)}
+							title="{c.name} — picked for {oddsPct(c.odds)} of {group.palette} seeds"
+						>
+							<span class="swatch" style="background:{c.swatch}"></span>
+							<span class="chip-name">{shortBgName(group.palette, c.name)}</span>
+							<span class="chip-odds">{oddsPct(c.odds)}</span>
+						</button>
+					{/each}
+				</div>
+			{/each}
+			{#if activeBackgrounds.length > 0}
+				<button class="ghost" onclick={() => (backgroundColors = [])}>
+					clear backgrounds ({activeBackgrounds.length})
+				</button>
+			{:else}
+				<small class="bg-hint">none selected = any background · % = how often it's picked in its palette</small>
+			{/if}
+
+			<div class="subhead">Ring colors {@render ringColorsInfo()} <small>needs layout</small></div>
+			<div class="color-chips-grid">
+				{#each visiblePrimaries as c}
+					<button
+						type="button"
+						class="chip-button"
+						class:selected={ringColors.includes(c.name)}
+						onclick={() => toggleRingColor(c.name)}
+					>
+						<span class="swatch" style="background:{c.swatch}"></span>
+						<span class="chip-name">{c.name}</span>
+					</button>
+				{/each}
+			</div>
+			{#if activeRingColors.length > 0}
+				<label class="checkbox">
+					<input type="checkbox" bind:checked={exactRingColors} />
+					<span>Only these colors (exclude seeds using others)</span>
+				</label>
+				<button
+					class="ghost"
+					onclick={() => {
+						ringColors = [];
+						exactRingColors = false;
+					}}
+				>
+					clear ring colors
+				</button>
+			{/if}
+
+			<div class="subhead">Splatter {@render splatterInfo()} <small>fast</small></div>
+			<label class="block">
+				<select bind:value={splatterMode}>
+					<option value="">Any</option>
+					<option value="none">None (no splatter at all)</option>
+					<option value="any">Has splatter (odds &gt; 0)</option>
+					<option value="light">Light only (≤ 0.005)</option>
+					<option value="moderate">Moderate+ (≥ 0.01)</option>
+					<option value="heavy">Heavy+ (≥ 0.08)</option>
+				</select>
+			</label>
+			<div class="bucket-row">
+				<div class="bucket-label">
+					<strong>Odds range</strong>
+					<small>0–0.5 · advanced</small>
+				</div>
+				<input
+					type="number"
+					bind:value={minSplatterOdds}
+					placeholder="min"
+					step="0.001"
+					min="0"
+					max="0.5"
+				/>
+				<input
+					type="number"
+					bind:value={maxSplatterOdds}
+					placeholder="max"
+					step="0.001"
+					min="0"
+					max="0.5"
+				/>
+			</div>
+		</section>
+
+		<section class="group group-layout">
+			<div class="section-head">
+				<h2>Characteristics</h2>
+				<small class="hint">needs layout</small>
+			</div>
+			<div class="char-grid">
+				<label class="block">
+					<span class="label">Min points {@render pointsInfo()}</span>
+					<input type="number" bind:value={minPoints} placeholder="—" min="0" />
+				</label>
+				<label class="block">
+					<span class="label">Max points</span>
+					<input type="number" bind:value={maxPoints} placeholder="—" min="0" />
+				</label>
+				<label class="block">
+					<span class="label">Min colors {@render colorsInfo()}</span>
+					<input type="number" bind:value={minColors} placeholder="—" min="1" max="16" />
+				</label>
+				<label class="block">
+					<span class="label">Max colors</span>
+					<input type="number" bind:value={maxColors} placeholder="—" min="1" max="16" />
+				</label>
+			</div>
+			<div class="subhead">Corner concentration {@render cornerInfo()}</div>
+			<label class="block">
+				<select bind:value={cornerConcentration}>
+					<option value="">Any (no filter)</option>
+					<option value="TL">Top-left densest</option>
+					<option value="TR">Top-right densest</option>
+					<option value="BL">Bottom-left densest</option>
+					<option value="BR">Bottom-right densest</option>
+					<option value="AnyLeft">Densest on left (TL or BL)</option>
+					<option value="AnyRight">Densest on right (TR or BR)</option>
+				</select>
+			</label>
+			{#if cornerConcentration}
+				<label class="block workers-row">
+					<div class="workers-head">
+						<span class="label">Min ratio (densest / sparsest)</span>
+						<span class="workers-value">{cornerRatio.toFixed(2)}×</span>
+					</div>
+					<input
+						type="range"
+						min="1"
+						max="3"
+						step="0.05"
+						bind:value={cornerRatio}
+					/>
+					<div class="workers-hint">
+						1.0 = no gradient required; ~1.5× ≈ moderate; ~2.0× ≈ pronounced
+					</div>
+				</label>
+			{/if}
+
+			<label class="checkbox">
+				<input type="checkbox" bind:checked={runLayout} />
+				<span>Always run layout (show points/colors per tile)</span>
+				{@render runLayoutInfo()}
+			</label>
+		</section>
+
+		<section class="group group-layout">
+			<div class="section-head">
+				<h2>Radius buckets{@render radiusBucketsInfo()}</h2>
+				<small class="hint">needs layout</small>
+			</div>
+			<div class="bucket-row">
+				<div class="bucket-label">
+					<strong>Small</strong>
+					<small>≤ 1.2% canvas</small>
+				</div>
+				<input
+					type="number"
+					bind:value={minSmall}
+					placeholder="min"
+					min="0"
+				/>
+				<input
+					type="number"
+					bind:value={maxSmall}
+					placeholder="max"
+					min="0"
+				/>
+			</div>
+			<div class="bucket-row">
+				<div class="bucket-label">
+					<strong>Medium</strong>
+					<small>1.2 – 3% canvas</small>
+				</div>
+				<input
+					type="number"
+					bind:value={minMedium}
+					placeholder="min"
+					min="0"
+				/>
+				<input
+					type="number"
+					bind:value={maxMedium}
+					placeholder="max"
+					min="0"
+				/>
+			</div>
+			<div class="bucket-row">
+				<div class="bucket-label">
+					<strong>Large</strong>
+					<small>&gt; 3% canvas</small>
+				</div>
+				<input
+					type="number"
+					bind:value={minLarge}
+					placeholder="min"
+					min="0"
+				/>
+				<input
+					type="number"
+					bind:value={maxLarge}
+					placeholder="max"
+					min="0"
+				/>
+			</div>
+		</section>
+
 		<section class="group group-generation">
 			<div class="section-head">
 				<h2>Generate</h2>
@@ -1976,7 +1977,7 @@
 			</div>
 			<label class="block workers-row">
 				<div class="workers-head">
-					<span class="label">Workers</span>
+					<span class="label">Workers {@render workersInfo()}</span>
 					<span class="workers-value">{workers}</span>
 				</div>
 				<input
@@ -2011,6 +2012,7 @@
 			<label class="checkbox">
 				<input type="checkbox" bind:checked={layoutTimeoutEnabled} />
 				<span>Layout timeout — skip seeds slower than this</span>
+				{@render layoutTimeoutInfo()}
 			</label>
 			{#if layoutTimeoutEnabled}
 				<label class="block timeout-row">
@@ -2227,7 +2229,7 @@
 		<p>
 			What the center looks like depends on the flow. On a Spiral or Circular piece it's the
 			eye of the swirl; on Explosive it's the point everything bursts out from (or rushes
-			into). This is the flow field's center, not the Orbital structure's center. The two are
+			into). This is the flow field's center, not the Ring center on the Orbital card. The two are
 			picked separately.
 		</p>
 		<p>
@@ -2239,6 +2241,187 @@
 			<strong>Fast to search.</strong> The center is known before any dots are laid out, so
 			even a tight range skips non-matching seeds almost instantly.
 		</div>
+	</FilterInfo>
+{/snippet}
+
+{#snippet traitsInfo()}
+	<FilterInfo title="Traits">
+		<p>
+			<strong>The traits qql.art shows for every seed.</strong> Pin one and every result
+			has it: the app writes it straight into the seed, so pinning costs no search time.
+		</p>
+		<p>
+			Left on <strong>Any</strong>, each trait is picked at random with qql.art's own odds,
+			e.g. Flow field: Spiral 25%, Horizontal and Vertical 18.75% each, Diagonal, Random
+			Linear, Explosive and Random Radial 6.25% each, Circular 12.5%.
+		</p>
+		<p>
+			<strong>Ringdots 1 / 3 / 7</strong> are each a coin flip when left on Any. If all three
+			come up off, the ones left to chance are switched back on (as on qql.art), so the
+			2-ring fallback only happens if you ask for it.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet curveLengthInfo()}
+	<FilterInfo title="Curve length">
+		<p>
+			<strong>How many steps each flow line runs:</strong> 500, 650 or 850, equal odds,
+			one value for the whole piece.
+		</p>
+		<p>
+			A weak lever. Longer lines can carry dots further from where they start, but most of a
+			long line's dots are thrown out for overlapping dots already placed, so the visible
+			difference is small. It shows most on sparse pieces.
+		</p>
+		<p>Fast: known before any dots are placed.</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet pointsInfo()}
+	<FilterInfo title="Points">
+		<p>
+			<strong>How many dots the piece ends up with</strong>, after the renderer throws out
+			every dot that would overlap one already placed.
+		</p>
+		<p>
+			Mostly set by Spacing, Ring size and Size variety, and by how much of the canvas the
+			flow lines cover. Pieces range from a few hundred dots to several hundred thousand
+			(around 900,000 at the very densest).
+		</p>
+		<p>
+			<strong>Needs a layout for every seed checked</strong>, so it's slow. Max points is the
+			cheaper side: a seed is dropped the moment it passes the maximum. Min points has to
+			finish each layout. Pair it with fast filters so fewer seeds reach the layout.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet colorsInfo()}
+	<FilterInfo title="Colors">
+		<p>
+			<strong>How many different palette colours the dots use.</strong> At most 16 (a full
+			Fidenza palette); most palettes top out lower.
+		</p>
+		<p>
+			Color variety sets how many colours each colour sequence keeps (Low 1–5, Medium 5–15,
+			High 10–25, capped at the palette's size), but how many actually appear depends on how
+			often the colour changes between groups of lines.
+		</p>
+		<p>
+			It counts the colour each group of lines starts with. A colour that only appears when
+			the colour shifts partway through a group isn't counted, so the number can read a
+			little lower than what you see. Needs a layout.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet runLayoutInfo()}
+	<FilterInfo title="Always run layout">
+		<p>
+			Runs the full layout for every result even when no filter needs it, so each tile shows
+			its point count, colour count and dot-size buckets, and the results can be sorted by
+			them.
+		</p>
+		<p>It slows searches down: a full layout per seed.</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet radiusBucketsInfo()}
+	<FilterInfo title="Radius buckets">
+		<p>
+			<strong>Dots counted by size</strong> (radius, as a share of canvas width):
+			<strong>Small</strong> up to 1.2%, <strong>Medium</strong> 1.2–3%,
+			<strong>Large</strong> over 3%.
+		</p>
+		<p>
+			Set mainly by Ring size and Size variety. Small ring size gives almost all small dots;
+			Large with Wild size variety produces the occasional huge bullseye. <em>Large: min
+			1</em> is the way to ask for "at least one hero bullseye".
+		</p>
+		<p>Needs a layout.</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet backgroundInfo()}
+	<FilterInfo title="Background">
+		<p>
+			<strong>Picked from the palette's list of backgrounds with fixed odds</strong> (the %
+			beside each swatch). Some backgrounds also swap or drop palette colours so the rings
+			stay visible on them.
+		</p>
+		<p>
+			Pick several to accept any of them; none means any background. Fast: known before any
+			dots are placed.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet ringColorsInfo()}
+	<FilterInfo title="Ring colors">
+		<p>
+			<strong>Palette colours that must appear on the dots.</strong> With
+			<em>Only these colors</em>, seeds that use any other colour are left out too.
+		</p>
+		<p>
+			Uses the same colour count as Colors (the colour each group of lines starts with), so a
+			colour that only turns up partway through a group can be missed. Needs a layout.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet splatterInfo()}
+	<FilterInfo title="Splatter">
+		<p>
+			<strong>Splatter is the scatter of small satellite dots</strong> thrown around some
+			dots. Each piece gets one chance per dot: none, or 0.001 up to 0.5.
+		</p>
+		<p>
+			Color variety limits it: Low never goes above 0.005, Medium tops out at 0.03, and only
+			High can reach 0.08 or 0.5. Presets: <strong>Light</strong> ≤ 0.005,
+			<strong>Moderate+</strong> ≥ 0.01, <strong>Heavy+</strong> ≥ 0.08.
+		</p>
+		<p>
+			It's a chance per dot, not a count, so a dense piece shows more splatter than a sparse
+			one at the same setting. Fast.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet cornerInfo()}
+	<FilterInfo title="Corner concentration">
+		<p>
+			<strong>Which quarter of the canvas holds the most dots</strong> (counting dots whose
+			centres are on the canvas), and optionally by how much: the densest quarter must have
+			at least <em>ratio</em> × as many dots as the sparsest.
+		</p>
+		<p>
+			Use it to find pieces weighted towards one side or corner. If a quarter has no dots at
+			all, the ratio counts as met. Needs a layout.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet workersInfo()}
+	<FilterInfo title="Workers">
+		<p>
+			<strong>How many CPU cores the search uses at once</strong>, and also how many
+			thumbnails render at the same time. More is faster but leaves less for other apps.
+		</p>
+	</FilterInfo>
+{/snippet}
+
+{#snippet layoutTimeoutInfo()}
+	<FilterInfo title="Layout timeout">
+		<p>
+			<strong>Skips any seed whose layout takes longer than this</strong> and counts it as a
+			miss, so very dense seeds can't stall a search. The results message says how many
+			timed out.
+		</p>
+		<p>
+			Only applies when a layout runs: point-level filters (points, colours, radius buckets,
+			corner concentration, ring colours) or Always run layout.
+		</p>
 	</FilterInfo>
 {/snippet}
 
@@ -2364,7 +2547,8 @@
 		<p>
 			<strong>How many chunks actually got placed</strong> — the Horizontal × Vertical grid
 			minus whatever Skip odds deleted. A piece always keeps at least one, and the most
-			possible is 49 (a full 7×7 grid).
+			possible is 56: a quirk of the algorithm gives 7 vertical sections an eighth row of
+			chunks (off the bottom of the canvas), so a full 7×7 grid has 7 × 8 starting chunks.
 		</p>
 		<p>
 			This is the ground-truth count, so it's usually the better filter when you care how
@@ -2464,7 +2648,7 @@
 {/snippet}
 
 {#snippet orbitalCenterInfo()}
-	<FilterInfo title="Center X & Center Y">
+	<FilterInfo title="Ring center X & Y">
 		<p>
 			<strong>Where the rings radiate from.</strong> Each axis is picked from a handful of
 			fixed positions:
