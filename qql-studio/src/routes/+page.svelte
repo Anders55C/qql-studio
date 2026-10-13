@@ -100,13 +100,11 @@
 	const backgroundGroups = $derived.by(() =>
 		paletteColors.filter((p) => !choices.colorPalette || p.palette === choices.colorPalette)
 	);
-	// Drop picks the pinned palette can't produce, so a stale selection can't
-	// silently reject every seed.
-	$effect(() => {
+	// Picks the pinned palette can't produce are kept (they come back if you
+	// switch palette again) but not sent, so a hidden pick can't reject seeds.
+	const activeBackgrounds = $derived.by(() => {
 		const reachable = new Set(backgroundGroups.flatMap((p) => p.backgrounds.map((b) => b.name)));
-		if (paletteColors.length && backgroundColors.some((b) => !reachable.has(b))) {
-			backgroundColors = backgroundColors.filter((b) => reachable.has(b));
-		}
+		return backgroundColors.filter((b) => reachable.has(b));
 	});
 	function toggleBackground(name: string) {
 		backgroundColors = backgroundColors.includes(name)
@@ -129,13 +127,10 @@
 		return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 	});
 
-	// Same for ring colors: picks the pinned palette doesn't have are dropped
-	// (their chips are hidden, so they'd be invisible and still reject seeds).
-	$effect(() => {
+	// Same for ring colors.
+	const activeRingColors = $derived.by(() => {
 		const reachable = new Set(visiblePrimaries.map((c) => c.name));
-		if (paletteColors.length && ringColors.some((c) => !reachable.has(c))) {
-			ringColors = ringColors.filter((c) => reachable.has(c));
-		}
+		return ringColors.filter((c) => reachable.has(c));
 	});
 
 	function toggleRingColor(name: string) {
@@ -157,14 +152,8 @@
 	let maxLarge = $state<number | null>(null);
 	let minAngle = $state<number>(0);
 	let maxAngle = $state<number>(90);
-	// When the angle filter doesn't apply (radial flow chosen), reset it to the
-	// full range so it reads as "no constraint" and can't silently reject seeds.
-	$effect(() => {
-		if (!angleApplies) {
-			minAngle = 0;
-			maxAngle = 90;
-		}
-	});
+	// When the angle filter doesn't apply (radial flow chosen) it's kept but not
+	// sent (see angleActive), so switching back restores the range you had.
 	// Spiral center bounds, in sixths of the canvas (0 = left/top edge,
 	// 6 = right/bottom edge). Centers range from −⅔ to 5⁄3 and the fixed
 	// choices all land on sixths, so −4…10 is the full, unconstrained range.
@@ -185,9 +174,8 @@
 				centerYMin > CENTER_LO ||
 				centerYMax < CENTER_HI)
 	);
-	$effect(() => {
-		if (!centerApplies) setCenter(CENTER_LO, CENTER_HI);
-	});
+	// Likewise the spiral center is kept but not sent while a linear flow is
+	// pinned (centerActive already requires centerApplies).
 	const sixthPct = (k: number) => `${Math.round((k / 6) * 100)}%`;
 	const centerPos = (k: number) => ((k - CENTER_LO) / (CENTER_HI - CENTER_LO)) * 100;
 	let cornerConcentration = $state<'' | 'TL' | 'TR' | 'BL' | 'BR' | 'AnyLeft' | 'AnyRight'>('');
@@ -209,11 +197,16 @@
 	let fSkip50 = $state<boolean>(false); // 0.5
 	let minFormationChunks = $state<number | null>(null);
 	let maxFormationChunks = $state<number | null>(null);
-	// Actual chunks can't exceed the grid, whose largest size is (max H)×(max V).
-	// "no cap" on a section axis means up to 7 (the largest section value).
-	const maxAchievableChunks = $derived(
-		(maxHorizontalSections ?? 7) * (maxVerticalSections ?? 7)
-	);
+	// Actual chunks can't exceed the grid of starting chunks. Sections come
+	// from {1,2,3,4,5,7}; "no cap" means up to 7. Quirk of the algorithm's
+	// float loop: 7 vertical sections give 8 rows (the 8th is off-canvas), so
+	// the largest grid is 7 × 8 = 56. (Horizontal has no such quirk.)
+	const largestSection = (cap: number | null) =>
+		Math.max(1, ...[1, 2, 3, 4, 5, 7].filter((v) => v <= (cap ?? 7)));
+	const maxAchievableChunks = $derived.by(() => {
+		const v = largestSection(maxVerticalSections);
+		return largestSection(maxHorizontalSections) * (v === 7 ? 8 : v);
+	});
 	const chunksImpossible = $derived(
 		formationEnabled &&
 			minFormationChunks != null &&
@@ -461,6 +454,112 @@
 	// {1,2,3,4,5,7} (note: no 6). See qqlrs-main/src/layouts.rs `formation()`.
 	const FORMATION_SECTION_VALUES = [1, 2, 3, 4, 5, 7];
 
+	// ---- Remembered filters ------------------------------------------------
+	// Every filter setting, with its default. Saving, restoring and "Reset all
+	// filters" all walk this one list, so a filter can't be left out of any.
+	type FilterField = [get: () => unknown, set: (v: any) => void, def: () => unknown];
+	const FILTER_FIELDS: Record<string, FilterField> = {
+		minPoints: [() => minPoints, (v) => (minPoints = v), () => null],
+		maxPoints: [() => maxPoints, (v) => (maxPoints = v), () => null],
+		minColors: [() => minColors, (v) => (minColors = v), () => null],
+		maxColors: [() => maxColors, (v) => (maxColors = v), () => null],
+		minSmall: [() => minSmall, (v) => (minSmall = v), () => null],
+		maxSmall: [() => maxSmall, (v) => (maxSmall = v), () => null],
+		minMedium: [() => minMedium, (v) => (minMedium = v), () => null],
+		maxMedium: [() => maxMedium, (v) => (maxMedium = v), () => null],
+		minLarge: [() => minLarge, (v) => (minLarge = v), () => null],
+		maxLarge: [() => maxLarge, (v) => (maxLarge = v), () => null],
+		minAngle: [() => minAngle, (v) => (minAngle = v), () => 0],
+		maxAngle: [() => maxAngle, (v) => (maxAngle = v), () => 90],
+		centerXMin: [() => centerXMin, (v) => (centerXMin = v), () => CENTER_LO],
+		centerXMax: [() => centerXMax, (v) => (centerXMax = v), () => CENTER_HI],
+		centerYMin: [() => centerYMin, (v) => (centerYMin = v), () => CENTER_LO],
+		centerYMax: [() => centerYMax, (v) => (centerYMax = v), () => CENTER_HI],
+		cornerConcentration: [() => cornerConcentration, (v) => (cornerConcentration = v), () => ''],
+		cornerRatio: [() => cornerRatio, (v) => (cornerRatio = v), () => 1.5],
+		minHorizontalSections: [() => minHorizontalSections, (v) => (minHorizontalSections = v), () => null],
+		maxHorizontalSections: [() => maxHorizontalSections, (v) => (maxHorizontalSections = v), () => null],
+		minVerticalSections: [() => minVerticalSections, (v) => (minVerticalSections = v), () => null],
+		maxVerticalSections: [() => maxVerticalSections, (v) => (maxVerticalSections = v), () => null],
+		fStep75: [() => fStep75, (v) => (fStep75 = v), () => false],
+		fStep100: [() => fStep100, (v) => (fStep100 = v), () => false],
+		fStep200: [() => fStep200, (v) => (fStep200 = v), () => false],
+		fStep400: [() => fStep400, (v) => (fStep400 = v), () => false],
+		fStep800: [() => fStep800, (v) => (fStep800 = v), () => false],
+		fSkip0: [() => fSkip0, (v) => (fSkip0 = v), () => false],
+		fSkip10: [() => fSkip10, (v) => (fSkip10 = v), () => false],
+		fSkip20: [() => fSkip20, (v) => (fSkip20 = v), () => false],
+		fSkip50: [() => fSkip50, (v) => (fSkip50 = v), () => false],
+		minFormationChunks: [() => minFormationChunks, (v) => (minFormationChunks = v), () => null],
+		maxFormationChunks: [() => maxFormationChunks, (v) => (maxFormationChunks = v), () => null],
+		minRingBands: [() => minRingBands, (v) => (minRingBands = v), () => null],
+		maxRingBands: [() => maxRingBands, (v) => (maxRingBands = v), () => null],
+		allowOrbitalSplit1: [() => allowOrbitalSplit1, (v) => (allowOrbitalSplit1 = v), () => false],
+		allowOrbitalSplit2: [() => allowOrbitalSplit2, (v) => (allowOrbitalSplit2 = v), () => false],
+		allowOrbitalSplit3: [() => allowOrbitalSplit3, (v) => (allowOrbitalSplit3 = v), () => false],
+		requireOrbitalSplit1: [() => requireOrbitalSplit1, (v) => (requireOrbitalSplit1 = v), () => false],
+		requireOrbitalSplit2: [() => requireOrbitalSplit2, (v) => (requireOrbitalSplit2 = v), () => false],
+		requireOrbitalSplit3: [() => requireOrbitalSplit3, (v) => (requireOrbitalSplit3 = v), () => false],
+		orbitalCenterX: [() => orbitalCenterX, (v) => (orbitalCenterX = v), () => []],
+		orbitalCenterY: [() => orbitalCenterY, (v) => (orbitalCenterY = v), () => []],
+		bs1: [() => bs1, (v) => (bs1 = v), () => false],
+		bs2: [() => bs2, (v) => (bs2 = v), () => false],
+		bs4: [() => bs4, (v) => (bs4 = v), () => false],
+		bs6: [() => bs6, (v) => (bs6 = v), () => false],
+		bs8: [() => bs8, (v) => (bs8 = v), () => false],
+		bs16: [() => bs16, (v) => (bs16 = v), () => false],
+		rs7: [() => rs7, (v) => (rs7 = v), () => false],
+		rs15: [() => rs15, (v) => (rs15 = v), () => false],
+		rs30: [() => rs30, (v) => (rs30 = v), () => false],
+		cl500: [() => cl500, (v) => (cl500 = v), () => false],
+		cl650: [() => cl650, (v) => (cl650 = v), () => false],
+		cl850: [() => cl850, (v) => (cl850 = v), () => false],
+		minSplitOffsetDeg: [() => minSplitOffsetDeg, (v) => (minSplitOffsetDeg = v), () => null],
+		maxSplitOffsetDeg: [() => maxSplitOffsetDeg, (v) => (maxSplitOffsetDeg = v), () => null],
+		backgroundColors: [() => backgroundColors, (v) => (backgroundColors = v), () => []],
+		ringColors: [() => ringColors, (v) => (ringColors = v), () => []],
+		exactRingColors: [() => exactRingColors, (v) => (exactRingColors = v), () => false],
+		splatterMode: [() => splatterMode, (v) => (splatterMode = v), () => ''],
+		minSplatterOdds: [() => minSplatterOdds, (v) => (minSplatterOdds = v), () => null],
+		maxSplatterOdds: [() => maxSplatterOdds, (v) => (maxSplatterOdds = v), () => null],
+		sc5: [() => sc5, (v) => (sc5 = v), () => false],
+		sc7: [() => sc7, (v) => (sc7 = v), () => false],
+		sc10: [() => sc10, (v) => (sc10 = v), () => false],
+		sc20: [() => sc20, (v) => (sc20 = v), () => false],
+		sc30: [() => sc30, (v) => (sc30 = v), () => false],
+		sc60: [() => sc60, (v) => (sc60 = v), () => false],
+		shadowsFillStyle: [() => shadowsFillStyle, (v) => (shadowsFillStyle = v), () => ''],
+		minShadowsActualCircles: [() => minShadowsActualCircles, (v) => (minShadowsActualCircles = v), () => null],
+		maxShadowsActualCircles: [() => maxShadowsActualCircles, (v) => (maxShadowsActualCircles = v), () => null],
+		shadowsColumnar: [() => shadowsColumnar, (v) => (shadowsColumnar = v), () => ''],
+		shadowsRadialDir: [() => shadowsRadialDir, (v) => (shadowsRadialDir = v), () => ''],
+	};
+	const FILTERS_KEY = 'qql-studio.filters.v1';
+	// A saved value is used only if it has the same shape as the default.
+	function sameShape(def: unknown, v: unknown): boolean {
+		if (Array.isArray(def)) return Array.isArray(v);
+		if (def === null) return v === null || typeof v === 'number';
+		return typeof v === typeof def;
+	}
+	function restoreFilters(saved: Record<string, unknown>) {
+		for (const [key, [, set, def]] of Object.entries(FILTER_FIELDS)) {
+			if (key in saved && sameShape(def(), saved[key])) set(saved[key]);
+		}
+	}
+	function resetAllFilters() {
+		for (const [, set, def] of Object.values(FILTER_FIELDS)) set(def());
+	}
+	$effect(() => {
+		const snap: Record<string, unknown> = {};
+		for (const [key, [get]] of Object.entries(FILTER_FIELDS)) snap[key] = get();
+		if (!filtersRestored) return;
+		try {
+			localStorage.setItem(FILTERS_KEY, JSON.stringify(snap));
+		} catch {}
+	});
+	// Don't save until the saved filters have been read back in on launch.
+	let filtersRestored = $state(false);
+
 	onMount(async () => {
 		try {
 			const persisted = localStorage.getItem(LS_KEY);
@@ -491,11 +590,28 @@
 				saveFolder = typeof s.saveFolder === 'string' ? s.saveFolder : null;
 				saveWidth = typeof s.saveWidth === 'number' ? s.saveWidth : 2400;
 			}
+			// Filters saved by this version (older versions kept only the angle
+			// and spiral center, read above from the settings).
+			const savedFilters = localStorage.getItem(FILTERS_KEY);
+			if (savedFilters) restoreFilters(JSON.parse(savedFilters));
 		} catch {}
+		filtersRestored = true;
 		traitsMeta = await listTraits();
 		paletteColors = await listPaletteColors();
 		unlisten = await listen<GenerateProgress>('search-progress', (event) => {
 			progress = event.payload;
+			// Show seeds as they're found. The final result list replaces this
+			// when the search ends (same seeds, same order), so late or missed
+			// updates can't leave anything out.
+			const fresh = event.payload.newCandidates ?? [];
+			if (busy && fresh.length > 0) {
+				const have = new Set(results.map((r) => r.seed));
+				const add = fresh.filter((c) => !have.has(c.seed));
+				if (add.length > 0) {
+					results = [...results, ...add];
+					if (renderRunStart === null) renderRunStart = performance.now();
+				}
+			}
 		});
 		await restoreAfterReload();
 	});
@@ -572,12 +688,6 @@
 					maxAttempts,
 					workers,
 					thumbWidth,
-					minAngle,
-					maxAngle,
-					centerXMin,
-					centerXMax,
-					centerYMin,
-					centerYMax,
 					layoutTimeoutEnabled,
 					layoutTimeoutSeconds,
 					runLayout,
@@ -693,9 +803,9 @@
 			})(),
 			minSplitOffsetDeg: minSplitOffsetDeg ?? undefined,
 			maxSplitOffsetDeg: maxSplitOffsetDeg ?? undefined,
-			backgroundColors: backgroundColors.length > 0 ? backgroundColors : undefined,
-			ringColors: ringColors.length > 0 ? ringColors : undefined,
-			exactRingColors: ringColors.length > 0 ? exactRingColors : undefined,
+			backgroundColors: activeBackgrounds.length > 0 ? activeBackgrounds : undefined,
+			ringColors: activeRingColors.length > 0 ? activeRingColors : undefined,
+			exactRingColors: activeRingColors.length > 0 ? exactRingColors : undefined,
 			splatterMode: splatterMode || undefined,
 			minSplatterOdds: minSplatterOdds ?? undefined,
 			maxSplatterOdds: maxSplatterOdds ?? undefined,
@@ -827,7 +937,7 @@
 			} else {
 				statusMsg = `Found ${results.length} in ${outcome.attempts.toLocaleString()} attempts${rate}.${timeouts}`;
 			}
-			if (results.length > 0) {
+			if (results.length > 0 && renderRunStart === null) {
 				renderRunStart = performance.now();
 			}
 		} catch (e) {
@@ -1111,6 +1221,11 @@
 			</div>
 		</section>
 
+		<div class="filters-bar">
+			<span>Filters <small>remembered between sessions</small></span>
+			<button class="ghost" onclick={resetAllFilters}>Reset all filters</button>
+		</div>
+
 		<section class="group group-layout">
 			<div class="section-head">
 				<h2>Characteristics</h2>
@@ -1127,11 +1242,11 @@
 				</label>
 				<label class="block">
 					<span class="label">Min colors</span>
-					<input type="number" bind:value={minColors} placeholder="—" min="1" max="20" />
+					<input type="number" bind:value={minColors} placeholder="—" min="1" max="16" />
 				</label>
 				<label class="block">
 					<span class="label">Max colors</span>
-					<input type="number" bind:value={maxColors} placeholder="—" min="1" max="20" />
+					<input type="number" bind:value={maxColors} placeholder="—" min="1" max="16" />
 				</label>
 			</div>
 			<label class="checkbox">
@@ -1228,9 +1343,9 @@
 					{/each}
 				</div>
 			{/each}
-			{#if backgroundColors.length > 0}
+			{#if activeBackgrounds.length > 0}
 				<button class="ghost" onclick={() => (backgroundColors = [])}>
-					clear backgrounds ({backgroundColors.length})
+					clear backgrounds ({activeBackgrounds.length})
 				</button>
 			{:else}
 				<small class="bg-hint">none selected = any background · % = how often it's picked in its palette</small>
@@ -1250,7 +1365,7 @@
 					</button>
 				{/each}
 			</div>
-			{#if ringColors.length > 0}
+			{#if activeRingColors.length > 0}
 				<label class="checkbox">
 					<input type="checkbox" bind:checked={exactRingColors} />
 					<span>Only these colors (exclude seeds using others)</span>
@@ -1607,8 +1722,8 @@
 					<strong>Actual chunks{@render formationChunksInfo()}</strong>
 					<small>placed after skips</small>
 				</div>
-				<input type="number" bind:value={minFormationChunks} placeholder="min" min="1" max="49" />
-				<input type="number" bind:value={maxFormationChunks} placeholder="max" min="1" max="49" />
+				<input type="number" bind:value={minFormationChunks} placeholder="min" min="1" max="56" />
+				<input type="number" bind:value={maxFormationChunks} placeholder="max" min="1" max="56" />
 			</div>
 			{#if chunksImpossible}
 				<div class="combo-warn">
@@ -1908,7 +2023,9 @@
 					/>
 					<div class="timeout-hint">
 						any single layout that exceeds this is abandoned and counted as
-						a non-match
+						a non-match. Only applies when a layout runs: point-level filters
+						(points, colors, radius buckets, corner concentration, ring colors) or
+						"Always run layout".
 					</div>
 				</label>
 			{/if}
@@ -3250,6 +3367,22 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(var(--tile-size, 240px), 1fr));
 		gap: 12px;
+	}
+	.filters-bar {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		margin: 4px 2px 6px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: #888;
+	}
+	.filters-bar small {
+		text-transform: none;
+		letter-spacing: 0;
+		color: #555;
+		margin-left: 4px;
 	}
 	.tile-slot.hidden {
 		display: none;

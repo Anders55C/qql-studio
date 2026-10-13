@@ -215,6 +215,8 @@ export type GenerateProgress = {
 	want: number;
 	/** Attempts abandoned at the layout timeout. */
 	timedOut: number;
+	/** Seeds found since the previous update, in the order found. */
+	newCandidates: Candidate[];
 };
 
 export type GenerateOutcome = {

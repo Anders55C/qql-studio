@@ -13,7 +13,7 @@ use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -786,6 +786,9 @@ pub struct GenerateProgress {
     pub want: usize,
     /// Attempts abandoned because their layout hit the layout timeout.
     pub timed_out: usize,
+    /// Seeds found since the previous update, in the order found, so the UI
+    /// can show results while the search is still running.
+    pub new_candidates: Vec<Candidate>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1012,6 +1015,8 @@ where
     let inflight_attempts = Arc::new(AtomicUsize::new(0));
     let inflight_found = Arc::new(AtomicUsize::new(0));
     let timed_out = Arc::new(AtomicUsize::new(0));
+    // Seeds found but not yet sent to the UI; the emitter drains it.
+    let pending_found: Arc<Mutex<Vec<Candidate>>> = Arc::new(Mutex::new(Vec::new()));
     let emitter_done = Arc::new(AtomicBool::new(false));
     let on_progress = Arc::new(on_progress);
 
@@ -1031,6 +1036,7 @@ where
         let inflight_attempts = inflight_attempts.clone();
         let inflight_found = inflight_found.clone();
         let timed_out = timed_out.clone();
+        let pending_found = pending_found.clone();
         let emitter_done = emitter_done.clone();
         let on_progress = on_progress.clone();
         std::thread::Builder::new()
@@ -1042,6 +1048,7 @@ where
                     max_attempts,
                     want,
                     timed_out: 0,
+                    new_candidates: Vec::new(),
                 });
                 while !emitter_done.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(60));
@@ -1059,6 +1066,7 @@ where
                         max_attempts,
                         want,
                         timed_out: timed_out.load(Ordering::Relaxed),
+                        new_candidates: std::mem::take(&mut *pending_found.lock().unwrap()),
                     });
                 }
             })
@@ -1178,6 +1186,7 @@ where
                 if results.len() >= want {
                     break;
                 }
+                pending_found.lock().unwrap().push(hit.clone());
                 results.push(hit);
             }
             found_atomic.store(results.len(), Ordering::Relaxed);
@@ -1199,6 +1208,7 @@ where
         max_attempts,
         want,
         timed_out,
+        new_candidates: std::mem::take(&mut *pending_found.lock().unwrap()),
     });
 
     Ok(GenerateOutcome {
@@ -1914,6 +1924,41 @@ mod tests {
             assert!((oi.center_y_frac - 0.666).abs() < 1e-6, "{} y={}", c.seed, oi.center_y_frac);
             assert_eq!((oi.center_x_position, oi.center_y_position), (-2, 1));
         }
+    }
+
+    #[test]
+    fn found_seeds_stream_in_order() {
+        let streamed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = streamed.clone();
+        let mut choices = TraitChoices::default();
+        choices.structure = Some("Formation".into());
+        let req = GenerateRequest {
+            address: "0x33c9371d25ce44a408f8a6473fbad86bf81e1a17".into(),
+            choices,
+            mode: GenerateMode::Construct,
+            count: 30,
+            max_attempts: Some(50_000),
+            run_layout: false,
+            characteristic_filter: Some(CharacteristicFilter {
+                max_horizontal_sections: Some(2),
+                ..Default::default()
+            }),
+            rng_seed: Some(4),
+            workers: Some(4),
+            min_angle_deg: None,
+            max_angle_deg: None,
+            min_center_x: None,
+            max_center_x: None,
+            min_center_y: None,
+            max_center_y: None,
+            layout_timeout_ms: None,
+        };
+        let outcome = generate_candidates_inner(req, move |p| {
+            sink.lock().unwrap().extend(p.new_candidates.into_iter().map(|c| c.seed));
+        })
+        .unwrap();
+        let finals: Vec<String> = outcome.candidates.iter().map(|c| c.seed.clone()).collect();
+        assert_eq!(*streamed.lock().unwrap(), finals);
     }
 
     #[test]
