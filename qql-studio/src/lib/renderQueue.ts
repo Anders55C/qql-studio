@@ -1,19 +1,24 @@
-// A small in-process concurrency limiter for renderSeed calls.
+// A small in-process concurrency limiter for thumbnail renders.
 //
 // Without this, every Tile fires its render request the moment it mounts and
 // the Tauri backend services them in essentially nondeterministic order — so
 // tiles in the grid appear in scattershot order rather than top-to-bottom.
 //
 // With this queue, at most `maxConcurrent` renders are in flight at once.
-// Tile components mount in array order, so they enqueue in order, so they
-// resolve in roughly the same order — you see the grid fill in waves of N
-// instead of a random pop-corn pattern.
+// Waiting tiles near the screen go first (each tile reports that through its
+// `near` callback); otherwise tiles start in the order they asked, which is
+// grid order, so the grid fills top-to-bottom in waves of N.
+//
+// Interactive work (the inspector's render, saving a favorite, exports) runs
+// outside the queue; while any is running, new thumbnails start at most one
+// at a time so that work gets the CPU.
 
-import { renderSeed, renderThumbnail, type RenderResult } from './api';
+import { renderThumbnail } from './api';
 
 let maxConcurrent = 8;
 let active = 0;
-type Waiter = { resolve: () => void; reject: (e: Error) => void };
+let interactive = 0;
+type Waiter = { resolve: () => void; reject: (e: Error) => void; near: () => boolean };
 let waiters: Waiter[] = [];
 
 /** Thrown to renders that were still queued when a new search started. */
@@ -42,16 +47,25 @@ export function setRenderConcurrency(n: number) {
 }
 
 function pump() {
-	while (active < maxConcurrent && waiters.length > 0) {
+	const limit = interactive > 0 ? 1 : maxConcurrent;
+	while (active < limit && waiters.length > 0) {
+		// First waiting tile that's near the screen, else the oldest.
+		let i = waiters.findIndex((w) => w.near());
+		if (i < 0) i = 0;
+		const [next] = waiters.splice(i, 1);
 		active += 1;
-		const next = waiters.shift()!;
 		next.resolve();
 	}
 }
 
-function acquire(): Promise<void> {
+/** Re-check priorities, e.g. after the user scrolls new tiles into view. */
+export function nudgeRenderQueue() {
+	pump();
+}
+
+function acquire(near: () => boolean): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
-		waiters.push({ resolve, reject });
+		waiters.push({ resolve, reject, near });
 		pump();
 	});
 }
@@ -61,9 +75,16 @@ function release() {
 	pump();
 }
 
-/** Queued thumbnail render into the disk cache; resolves to the file path. */
-export async function queuedRenderThumbnail(seedHex: string, width: number): Promise<string> {
-	await acquire();
+/**
+ * Queued thumbnail render into the disk cache; resolves to the file path.
+ * `near` says whether the tile is currently near the screen.
+ */
+export async function queuedRenderThumbnail(
+	seedHex: string,
+	width: number,
+	near: () => boolean = () => false
+): Promise<string> {
+	await acquire(near);
 	try {
 		return await renderThumbnail(seedHex, width);
 	} finally {
@@ -71,14 +92,16 @@ export async function queuedRenderThumbnail(seedHex: string, width: number): Pro
 	}
 }
 
-export async function queuedRenderSeed(
-	seedHex: string,
-	width: number
-): Promise<RenderResult> {
-	await acquire();
+/**
+ * Run interactive work (inspector render, favorite save, export) ahead of the
+ * thumbnail queue: while it runs, new thumbnails start one at a time.
+ */
+export async function withPriority<T>(work: () => Promise<T>): Promise<T> {
+	interactive += 1;
 	try {
-		return await renderSeed(seedHex, width);
+		return await work();
 	} finally {
-		release();
+		interactive -= 1;
+		pump();
 	}
 }

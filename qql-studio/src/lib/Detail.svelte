@@ -10,6 +10,7 @@
 		type LayoutStats
 	} from './api';
 	import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog';
+	import { withPriority } from './renderQueue';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { onDestroy, onMount } from 'svelte';
@@ -96,7 +97,7 @@
 		error = null;
 		pngUrl = null;
 		try {
-			const r = await renderSeed(candidate.seed, w, inflate);
+			const r = await withPriority(() => renderSeed(candidate.seed, w, inflate));
 			if (ticket !== renderTicket) return;
 			pngUrl = r.pngDataUrl;
 			renderedStats = r.stats;
@@ -131,7 +132,7 @@
 		exporting = true;
 		saveNote = null;
 		try {
-			await exportSeedPng(candidate.seed, width, dest, inflate);
+			await withPriority(() => exportSeedPng(candidate.seed, width, dest, inflate));
 			saveNote = { text: `Saved ${width}px PNG to ${dest}`, err: false };
 		} catch (e) {
 			saveNote = { text: `Save failed: ${e}`, err: true };
@@ -192,12 +193,12 @@
 			// Frame URLs point at files in the app cache (just written, so
 			// they load quickly); nothing is preloaded, which would decode every
 			// frame at once and defeat the point.
-			frames = await animationPreview(
+			frames = await withPriority(() => animationPreview(
 				candidate.seed,
 				animSize,
 				animFrameCount,
 				stats?.numPoints
-			);
+			));
 			frameIdx = 0;
 			startPlayer();
 		} catch (e) {
@@ -219,7 +220,7 @@
 		animError = null;
 		animProgress = null;
 		try {
-			await exportAnimation(
+			await withPriority(() => exportAnimation(
 				candidate.seed,
 				animSize,
 				animFrameCount,
@@ -228,7 +229,7 @@
 				animHoldMs,
 				dest,
 				stats?.numPoints
-			);
+			));
 		} catch (e) {
 			if (!isCancelled(e)) animError = `Export failed: ${e}`;
 		} finally {
@@ -249,7 +250,7 @@
 		animError = null;
 		animProgress = null;
 		try {
-			await exportAnimation(
+			await withPriority(() => exportAnimation(
 				candidate.seed,
 				animSize,
 				animFrameCount,
@@ -258,7 +259,7 @@
 				animHoldMs,
 				dest,
 				stats?.numPoints
-			);
+			));
 		} catch (e) {
 			if (!isCancelled(e)) animError = `Export failed: ${e}`;
 		} finally {

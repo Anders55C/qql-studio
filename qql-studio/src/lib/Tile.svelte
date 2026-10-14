@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { convertFileSrc } from '@tauri-apps/api/core';
-	import { queuedRenderThumbnail, StaleRenderError } from './renderQueue';
+	import { nudgeRenderQueue, queuedRenderThumbnail, StaleRenderError } from './renderQueue';
 
 	type Props = {
 		candidate: Candidate;
@@ -26,6 +26,22 @@
 	// data, so the webview holds a short path per tile and can free and
 	// re-decode the images itself under memory pressure.
 	let pngUrl = $state<string | null>(null);
+	// Whether the tile is on or near the screen. Only used to render such
+	// tiles first; images are never unloaded, so scrolling stays smooth.
+	let near = false;
+	let root = $state<HTMLDivElement | null>(null);
+	$effect(() => {
+		if (!root) return;
+		const io = new IntersectionObserver(
+			(entries) => {
+				near = entries[0].isIntersecting;
+				if (near && !pngUrl) nudgeRenderQueue();
+			},
+			{ rootMargin: '600px 0px' }
+		);
+		io.observe(root);
+		return () => io.disconnect();
+	});
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let reported = false;
@@ -62,7 +78,7 @@
 		loading = true;
 		error = null;
 		try {
-			const path = await queuedRenderThumbnail(candidate.seed, thumbWidth);
+			const path = await queuedRenderThumbnail(candidate.seed, thumbWidth, () => near);
 			pngUrl = convertFileSrc(path);
 			if (!reported) {
 				reported = true;
@@ -86,7 +102,7 @@
 	onMount(load);
 </script>
 
-<div class="tile">
+<div class="tile" bind:this={root}>
 	<div class="art-wrap">
 		<button class="art" onclick={() => onOpen?.(candidate)} aria-label="Open detail">
 			{#if pngUrl}

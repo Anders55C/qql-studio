@@ -25,7 +25,7 @@
 	import Tile from '$lib/Tile.svelte';
 	import FilterInfo from '$lib/FilterInfo.svelte';
 	import Detail from '$lib/Detail.svelte';
-	import { dropQueuedRenders, setRenderConcurrency } from '$lib/renderQueue';
+	import { dropQueuedRenders, setRenderConcurrency, withPriority } from '$lib/renderQueue';
 
 	const LS_KEY = 'qql-studio.v1';
 
@@ -1086,7 +1086,7 @@
 			const folder = await ensureSaveFolder();
 			if (!folder) return; // user cancelled the picker
 			try {
-				await saveSeedPng(seed, saveWidth, folder);
+				await withPriority(() => saveSeedPng(seed, saveWidth, folder));
 			} catch (e) {
 				error = `Couldn't save favorite: ${e}`;
 				return;
