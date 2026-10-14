@@ -1,6 +1,6 @@
 [package]
 name = "qql-studio"
-version = "0.1.2"
+version = "0.1.3"
 description = "QQL Studio — trait-filtered seed explorer"
 authors = ["you"]
 edition = "2021"
