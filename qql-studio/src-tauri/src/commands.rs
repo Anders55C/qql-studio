@@ -10,7 +10,6 @@ use qql::art::{FlowFieldSpec, Hsb};
 use qql::rand::Rng as QRng;
 use qql::traits as q;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -966,7 +965,7 @@ where
 {
     let address = parse_address(&request.address)?;
     let seed_for_rng = request.rng_seed.unwrap_or_else(|| rand::random());
-    let mut rng = StdRng::seed_from_u64(seed_for_rng);
+    let rng = StdRng::seed_from_u64(seed_for_rng);
 
     let want = request.count.clamp(1, 2048);
     let max_attempts = request
@@ -998,26 +997,23 @@ where
         .workers
         .filter(|w| (1..=64).contains(w))
         .unwrap_or_else(default_worker_count);
-    // One item per worker per batch. Larger batches give marginally better
-    // throughput but at this size each Cancel only needs to wait for one
-    // layout per worker to finish, which feels much snappier.
-    let batch_size = workers.max(4);
-
-    let mut results: Vec<Candidate> = Vec::with_capacity(want);
-    let mut attempts = 0usize;
-    let mut cancelled = false;
-
-    // Atomics shared with the progress-emitter thread so it can broadcast the
-    // live counts without coordinating with the work loop. `*_atomic` holds the
-    // count from completed batches; `inflight_*` ticks up inside parallel
-    // workers so the UI sees progress while a batch is mid-flight.
+    // Workers run continuously: each takes the next seed as soon as it's free,
+    // so one slow layout never leaves the other cores idle (the old batches
+    // waited for their slowest seed before starting the next batch).
+    let results: Mutex<Vec<Candidate>> = Mutex::new(Vec::with_capacity(want));
+    let rng = Mutex::new(rng);
+    // Attempt slots handed out (caps evaluation at max_attempts) and attempts
+    // finished (what's reported).
+    let claimed = AtomicUsize::new(0);
     let attempts_atomic = Arc::new(AtomicUsize::new(0));
     let found_atomic = Arc::new(AtomicUsize::new(0));
-    let inflight_attempts = Arc::new(AtomicUsize::new(0));
-    let inflight_found = Arc::new(AtomicUsize::new(0));
     let timed_out = Arc::new(AtomicUsize::new(0));
     // Seeds found but not yet sent to the UI; the emitter drains it.
     let pending_found: Arc<Mutex<Vec<Candidate>>> = Arc::new(Mutex::new(Vec::new()));
+    // Raised when the search should end: enough found, Cancel, or an error.
+    // Layouts in progress watch it too, so they stop promptly.
+    let stop = Arc::new(AtomicBool::new(false));
+    let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     let emitter_done = Arc::new(AtomicBool::new(false));
     let on_progress = Arc::new(on_progress);
 
@@ -1029,15 +1025,14 @@ where
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build thread pool: {e}"))?;
 
-    // Spawn a dedicated emitter so the UI sees regular updates even if the
-    // search itself runs in tight, sub-millisecond loops.
+    // A dedicated emitter sends regular progress updates (and passes Cancel
+    // on to `stop`, so layouts in progress hear about it within ~60 ms).
     let emitter_handle = {
         let attempts_atomic = attempts_atomic.clone();
         let found_atomic = found_atomic.clone();
-        let inflight_attempts = inflight_attempts.clone();
-        let inflight_found = inflight_found.clone();
         let timed_out = timed_out.clone();
         let pending_found = pending_found.clone();
+        let stop = stop.clone();
         let emitter_done = emitter_done.clone();
         let on_progress = on_progress.clone();
         std::thread::Builder::new()
@@ -1053,17 +1048,12 @@ where
                 });
                 while !emitter_done.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(60));
-                    let attempts =
-                        attempts_atomic.load(Ordering::Relaxed)
-                            + inflight_attempts.load(Ordering::Relaxed);
-                    let found = std::cmp::min(
-                        want,
-                        found_atomic.load(Ordering::Relaxed)
-                            + inflight_found.load(Ordering::Relaxed),
-                    );
+                    if CANCEL.load(Ordering::Relaxed) {
+                        stop.store(true, Ordering::Relaxed);
+                    }
                     on_progress(GenerateProgress {
-                        attempts,
-                        found,
+                        attempts: attempts_atomic.load(Ordering::Relaxed),
+                        found: found_atomic.load(Ordering::Relaxed).min(want),
                         max_attempts,
                         want,
                         timed_out: timed_out.load(Ordering::Relaxed),
@@ -1074,134 +1064,99 @@ where
             .expect("failed to spawn progress emitter")
     };
 
-    // Run the search in a closure so that any early `?` exit still reaches the
-    // emitter shutdown below.
-    let mut search = || -> anyhow::Result<()> {
-        while results.len() < want && attempts < max_attempts {
-            if CANCEL.load(Ordering::SeqCst) {
-                cancelled = true;
-                break;
+    // Check one seed against every filter, cheapest first.
+    let evaluate = |seed: &[u8; 32]| -> Option<Candidate> {
+        let traits = q::Traits::from_seed(seed);
+        if !matches_filter(&traits, &request.choices) {
+            return None;
+        }
+        if angle_active && !angle_passes(linear_flow_angle_deg(seed, &traits), min_angle, max_angle) {
+            return None;
+        }
+        if let Some(bounds) = center_bounds {
+            if !bounds.passes(qql::art::flow_center_frac(seed, render::color_db())) {
+                return None;
             }
-
-            let remaining_attempts = max_attempts - attempts;
-            let this_batch = batch_size.min(remaining_attempts);
-            if this_batch == 0 {
-                break;
+        }
+        if let Some(filter) = structure_filter {
+            if !filter.matches_structure(&render::structure_only(seed)) {
+                return None;
             }
-
-            let mut batch: Vec<[u8; 32]> = Vec::with_capacity(this_batch);
-            for _ in 0..this_batch {
-                batch.push(make_seed(&request, &address, &mut rng)?);
+        }
+        let stats = if needs_layout {
+            let deadline = layout_timeout.map(|d| std::time::Instant::now() + d);
+            match render::layout_only_with_limits(seed, deadline, point_cap, Some(&stop)) {
+                Some(s) => Some(s),
+                None => {
+                    // Timed out, over the max-points cap, or stopped.
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        timed_out.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return None;
+                }
             }
+        } else {
+            None
+        };
+        if let (Some(filter), Some(s)) = (points_filter, stats.as_ref()) {
+            if !filter.matches_points(s) {
+                return None;
+            }
+        }
+        Some(Candidate {
+            seed: seed_to_hex(seed),
+            traits: TraitsWire::from(&traits),
+            stats,
+        })
+    };
 
-            // Reset per-batch counters so the emitter sees a fresh in-flight tally.
-            inflight_attempts.store(0, Ordering::Relaxed);
-            inflight_found.store(0, Ordering::Relaxed);
-
-            let batch_results: Vec<Option<Candidate>> = {
-                let inflight_attempts = &inflight_attempts;
-                let inflight_found = &inflight_found;
-                pool.install(|| {
-                    batch
-                        .par_iter()
-                        .map(|seed| {
-                            // Fast bail when the user has hit Cancel. Each worker
-                            // still has to finish the layout it's currently on, but
-                            // subsequent items in its slice are skipped.
-                            if CANCEL.load(Ordering::Relaxed) {
-                                return None;
-                            }
-                            let traits = q::Traits::from_seed(seed);
-                            if !matches_filter(&traits, &request.choices) {
-                                inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                return None;
-                            }
-                            if angle_active {
-                                let angle = linear_flow_angle_deg(seed, &traits);
-                                if !angle_passes(angle, min_angle, max_angle) {
-                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                    return None;
-                                }
-                            }
-                            if let Some(bounds) = center_bounds {
-                                let center = qql::art::flow_center_frac(seed, render::color_db());
-                                if !bounds.passes(center) {
-                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                    return None;
-                                }
-                            }
-                            if let Some(filter) = structure_filter {
-                                if !filter.matches_structure(&render::structure_only(seed)) {
-                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                    return None;
-                                }
-                            }
-                            let stats = if needs_layout {
-                                let deadline =
-                                    layout_timeout.map(|d| std::time::Instant::now() + d);
-                                match render::layout_only_with_limits(
-                                    seed,
-                                    deadline,
-                                    point_cap,
-                                    Some(&CANCEL),
-                                ) {
-                                    Some(s) => Some(s),
-                                    None => {
-                                        // Timed out, went over the max-points cap,
-                                        // or was cancelled — count the attempt and
-                                        // move on.
-                                        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                                            timed_out.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                        return None;
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                            if let (Some(filter), Some(s)) = (points_filter, stats.as_ref()) {
-                                if !filter.matches_points(s) {
-                                    inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                                    return None;
-                                }
-                            }
-                            inflight_attempts.fetch_add(1, Ordering::Relaxed);
-                            inflight_found.fetch_add(1, Ordering::Relaxed);
-                            Some(Candidate {
-                                seed: seed_to_hex(seed),
-                                traits: TraitsWire::from(&traits),
-                                stats,
-                            })
-                        })
-                        .collect()
-                })
-            };
-
-            // Commit the in-flight counters into the running totals. Use the
-            // actual evaluated count so cancelled batches don't inflate `attempts`.
-            let batch_attempts = inflight_attempts.load(Ordering::Relaxed);
-            attempts += batch_attempts;
-            attempts_atomic.store(attempts, Ordering::Relaxed);
-            for hit in batch_results.into_iter().flatten() {
-                if results.len() >= want {
+    pool.scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|_| loop {
+                if stop.load(Ordering::Relaxed) || CANCEL.load(Ordering::Relaxed) {
                     break;
                 }
-                pending_found.lock().unwrap().push(hit.clone());
-                results.push(hit);
-            }
-            found_atomic.store(results.len(), Ordering::Relaxed);
-            inflight_attempts.store(0, Ordering::Relaxed);
-            inflight_found.store(0, Ordering::Relaxed);
+                if claimed.fetch_add(1, Ordering::Relaxed) >= max_attempts {
+                    break;
+                }
+                let seed = match make_seed(&request, &address, &mut *rng.lock().unwrap()) {
+                    Ok(seed) => seed,
+                    Err(e) => {
+                        failure.lock().unwrap().get_or_insert(e);
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                };
+                let hit = evaluate(&seed);
+                // A layout cut short by Cancel didn't really get checked.
+                if CANCEL.load(Ordering::Relaxed) {
+                    break;
+                }
+                attempts_atomic.fetch_add(1, Ordering::Relaxed);
+                if let Some(c) = hit {
+                    let mut found = results.lock().unwrap();
+                    if found.len() < want {
+                        pending_found.lock().unwrap().push(c.clone());
+                        found.push(c);
+                        found_atomic.store(found.len(), Ordering::Relaxed);
+                        if found.len() >= want {
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
         }
-        Ok(())
-    };
-    let search_result = search();
+    });
 
     // Stop the emitter (also on error) and flush a definitive final state.
     emitter_done.store(true, Ordering::Relaxed);
     let _ = emitter_handle.join();
-    search_result?;
+    if let Some(e) = failure.into_inner().unwrap() {
+        return Err(e);
+    }
+    let results = results.into_inner().unwrap();
+    let attempts = attempts_atomic.load(Ordering::Relaxed);
+    let cancelled = CANCEL.load(Ordering::SeqCst) && results.len() < want;
     let timed_out = timed_out.load(Ordering::Relaxed);
     on_progress(GenerateProgress {
         attempts,
